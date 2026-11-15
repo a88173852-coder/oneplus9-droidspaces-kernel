@@ -29,14 +29,18 @@ ANCHOR = (
 )
 
 PROBE = (
-    '\tif (current_uid().val >= 10000) {\n'
-    '\t\tint __p_app  = susfs_is_current_proc_umounted_app() ? 1 : 0;\n'
-    '\t\tint __p_map  = inode->i_mapping ? 1 : 0;\n'
-    '\t\tint __p_bit  = (inode->i_mapping &&\n'
-    '\t\t\ttest_bit(AS_FLAGS_SUS_PATH, &inode->i_mapping->flags)) ? 1 : 0;\n'
-    '\t\tSUSFS_LOGE("PROBE uid=%u app=%d map=%d bit=%d iuid=%u ino=%lu\\n",\n'
-    '\t\t\tcurrent_uid().val, __p_app, __p_map, __p_bit,\n'
-    '\t\t\tinode->i_uid.val, inode->i_ino);\n'
+    '\tif (current_uid().val != 0) {\n'
+    '\t\tstatic int __p_cnt = 0;\n'
+    '\t\tif (__p_cnt < 200) {\n'
+    '\t\t\tint __p_app  = susfs_is_current_proc_umounted_app() ? 1 : 0;\n'
+    '\t\t\tint __p_map  = inode->i_mapping ? 1 : 0;\n'
+    '\t\t\tint __p_bit  = (inode->i_mapping &&\n'
+    '\t\t\t\ttest_bit(AS_FLAGS_SUS_PATH, &inode->i_mapping->flags)) ? 1 : 0;\n'
+    '\t\t\t__p_cnt++;\n'
+    '\t\t\tSUSFS_LOGE("PROBE uid=%u app=%d map=%d bit=%d iuid=%u ino=%lu\\n",\n'
+    '\t\t\t\tcurrent_uid().val, __p_app, __p_map, __p_bit,\n'
+    '\t\t\t\tinode->i_uid.val, inode->i_ino);\n'
+    '\t\t}\n'
     '\t}\n'
 )
 

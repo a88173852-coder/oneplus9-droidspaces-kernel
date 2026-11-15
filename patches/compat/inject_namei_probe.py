@@ -26,12 +26,13 @@ src = open(PATH).read()
 ANCHOR_A = "\t\tstruct dentry *dentry = nd->path.dentry;\n"
 
 PROBE_A = (
-    '\t\tif (current_uid().val >= 10000) {\n'
+    '\t\tif (current_uid().val != 0) {\n'
     '\t\t\tstatic int __nprobe_w = 0;\n'
-    '\t\t\tif (__nprobe_w < 80) {\n'
+    '\t\t\tif (__nprobe_w < 200) {\n'
     '\t\t\t\t__nprobe_w++;\n'
-    '\t\t\t\tpr_info("NPROBE walk uid=%u ino=%lu\\n",\n'
+    '\t\t\t\tpr_info("NPROBE walk uid=%u ge10k=%d ino=%lu\\n",\n'
     '\t\t\t\t\tcurrent_uid().val,\n'
+    '\t\t\t\t\tcurrent_uid().val >= 10000 ? 1 : 0,\n'
     '\t\t\t\t\tdentry->d_inode ? dentry->d_inode->i_ino : 0UL);\n'
     '\t\t\t}\n'
     '\t\t}\n'
