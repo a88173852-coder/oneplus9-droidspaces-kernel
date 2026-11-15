@@ -70,18 +70,28 @@ NEW = """    /*
     }
     /*
      * 换之前先自证能过 kCFI：m_show() 里的间接调用会读 *(u32 *)(target - 4)
-     * 当 typeid 去比对。这里照做一遍 —— 原生 show 的 typeid vs 我们 wrapper 的
-     * typeid，相等才换。不相等则不做任何事（只是没隐藏，不会 panic）。
+     * 当 typeid 去比对。这里照做一遍，相等才换；不相等则不做任何事
+     * （只是没隐藏，不会 panic）。
+     *
+     * 注意（2026-11-16 实测修正）：不能拿 p->show - 4 当判据。p->show 在 CFI
+     * 内核上存的是 `.cfi_jt` 跳板地址，跳板自身前面未必是 typeid，读出来是
+     * 垃圾值 —— 上一版就是这么误判成「不匹配」而放弃的（实测
+     * native=17ba0cca ours=17ba0f2d）。真正的判据是 expected：它是 kallsyms
+     * 解析出的 show_xxx **本体**地址，本体前 4 字节才是编译器生成的 typeid。
+     * 两个候选都试一遍，任一匹配即认为兼容。
      */
     {
-        u32 want = *(u32 *)((unsigned long)p->show - 4);
         u32 have = *(u32 *)((unsigned long)filter - 4);
+        u32 want_body = *(u32 *)((unsigned long)expected - 4);
+        u32 want_show = *(u32 *)((unsigned long)p->show - 4);
 
-        if (want != have) {
-            pr_warn_once("mount_hide: kCFI typeid 不匹配 (native=%08x ours=%08x)，放弃\\n",
-                         want, have);
+        if (have != want_body && have != want_show) {
+            pr_warn_once("mount_hide: kCFI typeid 都不匹配 (filter=%08x body=%08x show=%08x)，放弃\\n",
+                         have, want_body, want_show);
             return 0;
         }
+        pr_info_once("mount_hide: kCFI typeid 复核通过 (filter=%08x body=%08x show=%08x)\\n",
+                     have, want_body, want_show);
     }
     pr_info_once("mount_hide: swap show %px -> %px (kallsyms orig=%px)\\n",
                  (void *)p->show, (void *)filter, (void *)expected);
