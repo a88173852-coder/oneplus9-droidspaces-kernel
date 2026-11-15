@@ -25,7 +25,7 @@ name: build-oneplus9-droidspaces
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main, master, sukisu-stage-a, sukisu-stage-b]
     paths:
       - '.github/workflows/build-kernel.yml'
       - 'patches/**'
@@ -45,6 +45,11 @@ jobs:
       VENDOR_SHA: d95833d6520887112ffed6537bfbef5e28650ca1
       KDIR: src/kernel/msm-5.4
       TARGET_VERMAGIC: "-qgki-gd2a1055adeb0"
+      # SukiSU-Ultra v4.3.0 + 一加9 (5.4 非 GKI) 兼容移植，钉死 commit 保证可复现。
+      # 上游 SukiSU-Ultra 只面向 GKI 2.0(5.10+)，这个移植补了 5.4 缺的
+      # struct selinux_policy / copy_*_user_nofault / pmd_leaf / seccomp action_cache。
+      SUKISU_REPO: https://github.com/LingQingMC/OnePlus9_ColorOS_SukiSU_Kernel.git
+      SUKISU_SHA: f3c8c525275b5ec08cd95f60c1ec9c897b78fec9
 
     steps:
       - uses: actions/checkout@v4
@@ -86,6 +91,10 @@ jobs:
           git -C src/vend checkout -q FETCH_HEAD
           echo "vendor: $(git -C src/vend log --oneline -1)"
           mv src/vend/vendor src/vendor
+          # techpack/{audio,camera,display,dataipa,video} 在内核仓库里是 git 子模块
+          # （mode 160000，克隆后为空目录），内容放在这个仓库的 kernel/msm-5.4 下，
+          # 必须叠加到内核目录上，否则报 techpack/audio/Makefile 不存在。
+          cp -a src/vend/kernel/msm-5.4/. "$KDIR/"
           rm -rf src/vend
 
           echo "=== 校验断链是否已解决 ==="
@@ -93,7 +102,9 @@ jobs:
                    include/linux/sched_assist \
                    drivers/soc/oplus/midas \
                    mm/task_mem \
-                   net/oplus_modules; do
+                   net/oplus_modules \
+                   techpack/audio/Makefile \
+                   techpack/display/Makefile; do
             if [ -e "$KDIR/$p" ]; then
               echo "  ok   $p"
             else
@@ -126,22 +137,12 @@ jobs:
           # 确认 rwsem.c 这个已知触发点已经改好
           grep -n 'sched/sched.h' "$KDIR/kernel/locking/rwsem.c" | head -3
 
-      # OPPO / 高通的 trace 头用的是老写法：
-      #   #define TRACE_INCLUDE_PATH .
-      #   #include <xxx_trace.h>
-      # 这要求把各自目录本身放进 -I 搜索路径（原厂构建里有，公开树里没有）。
-      # 这里自动收集所有含 trace 头文件的目录，拼成 KCEXTRA 供编译使用。
-      - name: Collect extra include dirs for trace headers
-        run: |
-          set -e
-          mapfile -t dirs < <(find "$KDIR" src/vendor -type f -name '*trace*.h' -printf '%h\n' 2>/dev/null | sort -u | head -200)
-          echo "含 trace 头文件的目录数: ${#dirs[@]}"
-          inc=""
-          for d in "${dirs[@]}"; do
-            inc="$inc -I$(cd "$d" && pwd)"
-          done
-          echo "KCEXTRA=$inc" >> "$GITHUB_ENV"
-          echo "前 3 个: $(printf '%s\n' "$inc" | tr ' ' '\n' | grep -m3 -- '-I' | tr '\n' ' ')"
+          # OPPO / 高通的 trace 头用老写法 TRACE_INCLUDE_PATH . + #include <xxx_trace.h>，
+          # 要求把「当前子目录」加进搜索路径（原厂私有构建里有，公开树没有）。
+          # 给每个子目录加它自己的 -I，而不是全局平铺 —— 否则同名的 trace.h
+          # 会互相抢匹配（arch/arm/kvm/trace.h 曾抢掉 kernel/sched/walt/trace.h）。
+          echo 'KBUILD_CFLAGS += -I$(srctree)/$(src)' >> "$KDIR/scripts/Makefile.lib"
+          tail -3 "$KDIR/scripts/Makefile.lib"
 
       - name: Fetch AOSP clang (clang 11.0.2 / r383902b)
         run: |
@@ -178,6 +179,54 @@ jobs:
         run: |
           patch -d "$KDIR" -p1 --fuzz=3 --verbose < patches/droidspaces-5.4-kabi.patch
 
+      # ---- SukiSU-Ultra 集成（非 GKI 5.4 移植）----
+      # 只取最小改动，不照抄参考仓库那两个"整文件覆盖"的补丁：
+      #   a) drivers/Makefile + drivers/Kconfig：追加编译入口（各 2 行）
+      #   b) fs/namespace.c 末尾追加 path_umount：5.4 没有这个函数，
+      #      App Profile 的「按 App 卸载模块」在 <5.10 必须靠它（官方文档明确要求回移），
+      #      SUSFS 的 sus_mount 也依赖
+      #   c) security/selinux/ss/services.c：策略重载后重新注入 sepolicy，
+      #      否则 u:r:ksu:s0 会在 reload 后失效，表现为"su 时好时坏"
+      # 刻意不应用参考仓库的 kernel/module.c 补丁：那是把 CRC 校验放宽到直接放行。
+      # 我们是靠原厂 config + 原厂 clang 11.0.2 把 CRC 做对的，放宽等于放弃那层保护。
+      - name: Integrate SukiSU-Ultra (non-GKI 5.4 port)
+        run: |
+          set -euo pipefail
+          SRC=src/sukisu-src
+          rm -rf "$SRC" && mkdir -p "$SRC"
+          git init -q "$SRC"
+          git -C "$SRC" remote add origin "$SUKISU_REPO"
+          git -C "$SRC" fetch -q --depth=1 origin "$SUKISU_SHA"
+          git -C "$SRC" checkout -q FETCH_HEAD
+          echo "SukiSU 源: $(git -C "$SRC" log --oneline -1)"
+
+          # 参考仓库里残留的 *.bak2 / *.orig2 不进树
+          find "$SRC/KernelSU" -name '*.bak*' -delete
+          find "$SRC/KernelSU" -name '*.orig*' -delete
+
+          cp -a "$SRC/KernelSU" "$KDIR/KernelSU"
+          ln -sfn ../KernelSU/kernel "$KDIR/drivers/kernelsu"
+          grep -q 'obj-$(CONFIG_KSU)' "$KDIR/drivers/Makefile" \
+            || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$KDIR/drivers/Makefile"
+          grep -q 'drivers/kernelsu/Kconfig' "$KDIR/drivers/Kconfig" \
+            || printf '\nsource "drivers/kernelsu/Kconfig"\n' >> "$KDIR/drivers/Kconfig"
+
+          # 5.4 没有 linux/pgtable.h（5.8 才从 asm/pgtable.h 独立出来）
+          [ -f "$KDIR/include/linux/pgtable.h" ] \
+            || cp patches/include-linux-pgtable.h "$KDIR/include/linux/pgtable.h"
+
+          # path_umount 追加到文件末尾：不占 hunk 上下文，后面叠 SUSFS 补丁不会打架
+          if ! grep -q 'KernelSU / SukiSU support for non-GKI kernels' "$KDIR/fs/namespace.c"; then
+            cat patches/sukisu-path_umount.c >> "$KDIR/fs/namespace.c"
+          fi
+
+          patch -d "$KDIR" -p1 --fuzz=3 --verbose < patches/sukisu-selinux-reload.patch
+
+          test -f "$KDIR/drivers/kernelsu/Kbuild" || { echo "::error::KSU 源码没就位"; exit 1; }
+          grep -q 'kernelsu-objs' "$KDIR/drivers/kernelsu/Kbuild" || { echo "::error::KSU Kbuild 异常"; exit 1; }
+          echo "KSU 源文件数: $(find "$KDIR/KernelSU/kernel" -name '*.c' | wc -l)"
+          grep -n 'CONFIG_KSU' "$KDIR/drivers/Makefile" "$KDIR/drivers/Kconfig"
+
       - name: Configure
         run: |
           set -e
@@ -192,9 +241,11 @@ jobs:
 
           # 叠加 Droidspaces 配置
           cat config/droidspaces.config >> "$KDIR/.config"
+          # 叠加 SukiSU 配置（CONFIG_KSU）
+          cat config/sukisu.config >> "$KDIR/.config"
 
           make -C "$KDIR" ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
-            KCFLAGS="-D__ANDROID_COMMON_KERNEL__ $KCEXTRA" olddefconfig
+            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" olddefconfig
 
           echo "=== 关键配置复查（依据 Droidspaces 官方 GKI 清单）==="
           # 缺任意一项：容器直接起不来 / 硬件不可用 —— 硬失败
@@ -224,7 +275,39 @@ jobs:
           grep -E '^CONFIG_LOCALVERSION' "$KDIR/.config"
           grep -q '^# CONFIG_LOCALVERSION_AUTO is not set' "$KDIR/.config" \
             || { echo "::error::LOCALVERSION_AUTO 没关掉，vermagic 会带脏尾"; exit 1; }
+
+          # 原厂功能对齐：源码把 OPPO_* 改名成 OPLUS_*，不显式开就会静默丢掉
+          # 指纹是硬失败项：COMMON 不开 -> 链接期 opticalfp_irq_handler_register
+          # 未定义；GOODIX/QCOM 不开 -> /dev/goodix_fp 不存在，HAL 起来就退出 255
+          for sym in OPLUS_FINGERPRINT OPLUS_FINGERPRINT_COMMON OPLUS_FINGERPRINT_QCOM \
+                     OPLUS_FINGERPRINT_GOODIX_OPTICAL OPLUS_FINGERPRINT_JIIOV_OPTICAL; do
+            if grep -q "^CONFIG_${sym}=y" "$KDIR/.config"; then
+              printf "  ok    CONFIG_%s=y\n" "$sym"
+            else
+              echo "::error::CONFIG_${sym} 被 olddefconfig 丢掉了，指纹会失效"; exit 1
+            fi
+          done
+          for sym in OPLUS_FEATURE_SCHED_ASSIST DEVTMPFS_MOUNT; do
+            grep -q "^CONFIG_${sym}=y" "$KDIR/.config" \
+              && printf "  ok    CONFIG_%s=y\n" "$sym" \
+              || echo "::warning::CONFIG_${sym} 没开（原厂是开的，功能会缺失）"
+          done
           echo "OPLUS 私有项数量: $(grep -c OPLUS "$KDIR/.config")"
+
+          # KSU 是硬失败项：KSU 依赖 KPROBES + EXT4_FS，任一不满足 olddefconfig 会把它悄悄丢掉，
+          # 编出来的内核看着正常、刷进去没有 root，最难排查。
+          if grep -q '^CONFIG_KSU=y' "$KDIR/.config"; then
+            printf "  ok    CONFIG_KSU=y\n"
+          else
+            echo "::error::CONFIG_KSU 被 olddefconfig 丢掉了（检查 KPROBES / EXT4_FS）"; exit 1
+          fi
+          for sym in KSU_MANUAL_SU; do
+            grep -q "^CONFIG_${sym}=y" "$KDIR/.config" \
+              && printf "  ok    CONFIG_%s=y\n" "$sym" \
+              || echo "::warning::CONFIG_${sym} 没开，授权链会依赖管理器常驻"
+          done
+          grep -q '^# CONFIG_KPM is not set' "$KDIR/.config" \
+            || echo "::warning::CONFIG_KPM 状态不是预期的关闭"
 
       - name: Build Image
         run: |
@@ -233,10 +316,14 @@ jobs:
           echo "runner: $(nproc) cores / $(free -g | awk '/^Mem:/{print $2}') GB RAM"
           df -h / | tail -1
           make -C "$KDIR" -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
-            KCFLAGS="-D__ANDROID_COMMON_KERNEL__ $KCEXTRA" Image 2>&1 | tee build.log
+            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" Image 2>&1 | tee build.log
           ls -l "$KDIR/arch/arm64/boot/Image"
           echo "=== 产物自检 ==="
           grep -m2 '__cfi_slowpath' "$KDIR/System.map" || { echo "::error::System.map 里没有 __cfi_slowpath，CFI 没编进去"; exit 1; }
+          echo "=== KSU 符号自检 ==="
+          grep -c -E ' (ksu|kernelsu)_' "$KDIR/System.map" || true
+          grep -m5 -E ' (ksu_reapply_sepolicy_after_reload|ksu_supercall|kernelsu_init)$' "$KDIR/System.map" \
+            || { echo "::error::System.map 里找不到 KSU 符号，KSU 没编进内核"; exit 1; }
           if strings "$KDIR/arch/arm64/boot/Image" | grep -q '5\.4\.254-qgki-gd2a1055adeb0+'; then
             echo "::error::内核版本串带了 + ，模块会全部拒载"; exit 1
           fi
@@ -245,20 +332,27 @@ jobs:
           if [ ! -s "$KDIR/Module.symvers" ]; then
             echo "!! Module.symvers 缺失，补跑 modules"
             make -C "$KDIR" -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
-              KCFLAGS="-D__ANDROID_COMMON_KERNEL__ $KCEXTRA" modules 2>&1 | tail -20
+              KCFLAGS="-D__ANDROID_COMMON_KERNEL__" modules 2>&1 | tail -20
           fi
           [ -s "$KDIR/Module.symvers" ] || { echo "::error::Module.symvers 生成失败"; exit 1; }
           echo "Module.symvers 行数: $(wc -l < "$KDIR/Module.symvers")"
 
       # 关键一步：拿新内核的 Module.symvers 跟手机里 99 个厂商模块要求的 CRC 对一遍
+      #
+      # 必须带上 stock-vmlinux-exports.json：模块的依赖分两类来源，
+      #   a) vmlinux 导出 -> 由我们重编的内核提供，必须逐个校验 CRC；
+      #   b) 另一个 .ko 导出（q6_dlkm 导出 adm_*、swr_dlkm 导出 __devm_regmap_init_swr ...）
+      #      -> 那些 .ko 都是原厂原件不动，互相之间天然自洽。
+      # `make Image` 的 Module.symvers 只含 vmlinux 导出，不区分就会把 (b) 类误报成失败。
       - name: Verify vendor module CRCs
         id: crc
         continue-on-error: true
         run: |
           set -euo pipefail
           gunzip -c checks/vendor-crc-baseline.json.gz > /tmp/baseline.json
+          gunzip -c checks/stock-vmlinux-exports.json.gz > /tmp/vmlinux-exports.json
           ls -l "$KDIR/Module.symvers"
-          python3 checks/check_vendor_crc.py verify /tmp/baseline.json "$KDIR/Module.symvers" | tee crc-report.txt
+          python3 checks/check_vendor_crc.py verify /tmp/baseline.json "$KDIR/Module.symvers" /tmp/vmlinux-exports.json | tee crc-report.txt
 
       - name: Upload artifacts
         if: always()
