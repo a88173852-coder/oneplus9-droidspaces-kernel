@@ -274,16 +274,7 @@ jobs:
 
           # SukiSU 的 Kconfig 里没有 KSU_SUSFS 这个开关（susfs.Kconfig 依赖它），补一个
           if ! grep -q '^config KSU_SUSFS$' "$KDIR/KernelSU/kernel/Kconfig"; then
-            cat >> "$KDIR/KernelSU/kernel/Kconfig" <<'KCFG'
-
-config KSU_SUSFS
-	bool "Enable SUSFS support"
-	depends on KSU
-	default n
-	help
-	  Gate for SuSFS. The implementation comes from the non-GKI 5.4
-	  backport patch; this switch only exposes it to Kconfig.
-KCFG
+            printf '\nconfig KSU_SUSFS\n\tbool "Enable SUSFS support"\n\tdepends on KSU\n\tdefault n\n\thelp\n\t  Gate for SuSFS. Implementation comes from the non-GKI 5.4\n\t  backport patch; this switch only exposes it to Kconfig.\n' >> "$KDIR/KernelSU/kernel/Kconfig"
           fi
           grep -n -A3 '^config KSU_SUSFS$' "$KDIR/KernelSU/kernel/Kconfig"
 
