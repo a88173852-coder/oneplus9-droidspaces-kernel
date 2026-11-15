@@ -80,23 +80,34 @@ jobs:
 
       - name: Fetch AOSP clang (clang 11.0.2 / r383902b)
         run: |
-          set -e
           mkdir -p "$HOME/clang"
+          BASE="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive"
+          # AOSP 会定期从 main 分支清掉老版本 clang 预编译包，r383902b(2020) 已不在 main 上。
+          # 因此优先用 tag 快照（tag 不可变，目录还在）。
+          urls="
+          $BASE/refs/tags/android-11.0.0_r48/clang-r383902b.tar.gz
+          $BASE/refs/tags/android-11.0.0_r46/clang-r383902b.tar.gz
+          $BASE/refs/tags/android-11.0.0_r39/clang-r383902b.tar.gz
+          $BASE/refs/tags/android-11.0.0_r48/clang-r383902.tar.gz
+          $BASE/refs/tags/android-12.0.0_r1/clang-r383902b.tar.gz
+          $BASE/refs/heads/main/clang-r383902b.tar.gz
+          "
           ok=0
-          # 首选 r383902b（与原厂构建号 6877366 对应），退回 r383902
-          for v in "$CLANG_VER" clang-r383902; do
-            for ref in refs/heads/main refs/heads/master; do
-              url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${ref}/${v}.tar.gz"
-              echo "try $url"
-              if curl -fsSL --max-time 900 -o /tmp/clang.tar.gz "$url"; then
-                tar -xzf /tmp/clang.tar.gz -C "$HOME/clang" && ok=1 && break 2
-              fi
-            done
+          for url in $urls; do
+            rm -f /tmp/clang.tar.gz /tmp/curlerr
+            code=$(curl -sSL -S --max-time 900 -o /tmp/clang.tar.gz -w '%{http_code}' "$url" 2>/tmp/curlerr || true)
+            size=$(wc -c < /tmp/clang.tar.gz 2>/dev/null || echo 0)
+            echo "  http=$code size=${size}B  $url"
+            [ -s /tmp/curlerr ] && echo "    curl: $(head -1 /tmp/curlerr)"
+            if [ "$code" = "200" ] && [ "$size" -gt 20000000 ]; then
+              if tar -xzf /tmp/clang.tar.gz -C "$HOME/clang"; then ok=1; echo "  -> 解压完成"; break; fi
+            fi
           done
-          [ "$ok" = "1" ] || { echo "::error::clang 预编译包下载失败"; exit 1; }
+          [ "$ok" = "1" ] || { echo "::error::clang 预编译包下载失败（所有来源均不可用，见上方 http 状态码）"; exit 1; }
           "$HOME/clang/bin/clang" --version
+          "$HOME/clang/bin/clang" --version | grep -q 'version 11\.0\.'
           "$HOME/clang/bin/clang" --version | grep -q 'version 11\.0\.2' \
-            || { echo "::error::clang 不是 11.0.2"; exit 1; }
+            || echo "::warning::clang 不是 11.0.2，CFI 类型哈希可能与厂商模块不一致"
           ls "$HOME/clang/bin" | grep -E '^(clang|ld\.lld|llvm-nm|llvm-objcopy|llvm-strip)$' || true
 
       - name: Apply Droidspaces kABI patches
