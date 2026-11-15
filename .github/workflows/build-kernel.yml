@@ -388,13 +388,11 @@ jobs:
             || { echo "::error::setresuid hook 又被抹成空宏了，sus_path 会全线失效"; exit 1; }
           echo "控制面自检通过：$(grep -c 'susfs_.*(arg)' "$KDIR/include/linux/odin_ksu_hooks.h") 个命令已接线"
 
-          # 临时探点：sus_path 添加成功但完全不拦截，需要内核自报三个条件的实际值
-          # （定位完成后删掉这两行即可）
-          python3 patches/compat/inject_probe.py "$KDIR/fs/susfs.c"
-          grep -q 'PROBE uid=' "$KDIR/fs/susfs.c" || { echo "::error::sus_path 探点没注入"; exit 1; }
-          # namei 侧探点：区分「钩子没落盘」和「钩子落盘但没走到」
-          python3 patches/compat/inject_namei_probe.py "$KDIR/fs/namei.c"
-          grep -c 'NPROBE' "$KDIR/fs/namei.c" || echo "!! namei 探点未注入（见上一行结论）"
+          # 探点已撤（2026-11-16）：sus_path 的真因不是内核逻辑，而是 flash_stagec.sh 的
+          # push_once 只比文件大小 —— 所有 Image 都正好 44945920 字节，于是每次都「跳过传输」，
+          # 一直在刷 00:37 那份旧内核。修正成 md5 比对后，带门修复的镜像一刷上，
+          # sus_path 立刻生效（app uid 10318 看不到 /system/etc/hosts，root 正常）。
+          # 探点留着只会污染 .rodata（曾把 uname 伪装串冲成 '5.4.254-qgki-gPROBE'），故删除。
           echo "susfs.c 行数: $(wc -l < "$KDIR/fs/susfs.c")"
 
       - name: Configure
