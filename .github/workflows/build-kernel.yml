@@ -306,6 +306,18 @@ jobs:
           #    改用 patches/compat/odin_ksu_hooks.h 的宏版本
           cp patches/compat/odin_ksu_hooks.h "$KDIR/include/linux/odin_ksu_hooks.h"
 
+          # 3b) sus_path 的前置门改成只看 uid
+          #   原式: test_thread_flag(TIF_PROC_UMOUNTED) && current_uid() >= 10000
+          #   flag 由原 fork 的 __sys_setresuid hook 打，而 SukiSU 的 su 走 setuid(2)
+          #   → __sys_setuid 是独立函数，不经过 __sys_setresuid，flag 永远打不上，
+          #   于是每个进程都被判「不是 app 进程」，add-sus-path 全部静默空转
+          #   （实测：dmesg 里 flag 置位成功、命令 ret 0，但 app 侧照样看得见）。
+          #   app 判定本身就是 current_uid() >= 10000，去掉 flag 条件是等价的且不依赖 KSU 侧。
+          python3 -c 'import sys; p=sys.argv[1]; s=open(p).read(); n=s.replace("return (likely(test_thread_flag(TIF_PROC_UMOUNTED)) &&","return ("); assert n!=s, "门没替换成功"; open(p,"w").write(n)' "$KDIR/include/linux/susfs_def.h"
+          grep -A3 'bool susfs_is_current_proc_umounted_app(void)' "$KDIR/include/linux/susfs_def.h"
+          grep -q 'test_thread_flag(TIF_PROC_UMOUNTED)) &&' "$KDIR/include/linux/susfs_def.h" \
+            && { echo "::error::sus_path 的门还依赖 TIF_PROC_UMOUNTED"; exit 1; } || true
+
           # path_umount 现在补：SUSFS 补丁已经把 namespace.c 改完，追加不会打架
           if ! grep -q 'KernelSU / SukiSU support for non-GKI kernels' "$KDIR/fs/namespace.c"; then
             cat patches/sukisu-path_umount.c >> "$KDIR/fs/namespace.c"
