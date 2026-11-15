@@ -126,6 +126,23 @@ jobs:
           # 确认 rwsem.c 这个已知触发点已经改好
           grep -n 'sched/sched.h' "$KDIR/kernel/locking/rwsem.c" | head -3
 
+      # OPPO / 高通的 trace 头用的是老写法：
+      #   #define TRACE_INCLUDE_PATH .
+      #   #include <xxx_trace.h>
+      # 这要求把各自目录本身放进 -I 搜索路径（原厂构建里有，公开树里没有）。
+      # 这里自动收集所有含 trace 头文件的目录，拼成 KCEXTRA 供编译使用。
+      - name: Collect extra include dirs for trace headers
+        run: |
+          set -e
+          mapfile -t dirs < <(find "$KDIR" src/vendor -type f -name '*trace*.h' -printf '%h\n' 2>/dev/null | sort -u | head -200)
+          echo "含 trace 头文件的目录数: ${#dirs[@]}"
+          inc=""
+          for d in "${dirs[@]}"; do
+            inc="$inc -I$(cd "$d" && pwd)"
+          done
+          echo "KCEXTRA=$inc" >> "$GITHUB_ENV"
+          echo "前 3 个: $(printf '%s\n' "$inc" | tr ' ' '\n' | grep -m3 -- '-I' | tr '\n' ' ')"
+
       - name: Fetch AOSP clang (clang 11.0.2 / r383902b)
         run: |
           mkdir -p "$HOME/clang"
@@ -177,7 +194,7 @@ jobs:
           cat config/droidspaces.config >> "$KDIR/.config"
 
           make -C "$KDIR" ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
-            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" olddefconfig
+            KCFLAGS="-D__ANDROID_COMMON_KERNEL__ $KCEXTRA" olddefconfig
 
           echo "=== 关键配置复查（依据 Droidspaces 官方 GKI 清单）==="
           # 缺任意一项：容器直接起不来 / 硬件不可用 —— 硬失败
@@ -216,7 +233,7 @@ jobs:
           echo "runner: $(nproc) cores / $(free -g | awk '/^Mem:/{print $2}') GB RAM"
           df -h / | tail -1
           make -C "$KDIR" -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
-            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" Image 2>&1 | tee build.log
+            KCFLAGS="-D__ANDROID_COMMON_KERNEL__ $KCEXTRA" Image 2>&1 | tee build.log
           ls -l "$KDIR/arch/arm64/boot/Image"
           echo "=== 产物自检 ==="
           grep -m2 '__cfi_slowpath' "$KDIR/System.map" || { echo "::error::System.map 里没有 __cfi_slowpath，CFI 没编进去"; exit 1; }
@@ -228,7 +245,7 @@ jobs:
           if [ ! -s "$KDIR/Module.symvers" ]; then
             echo "!! Module.symvers 缺失，补跑 modules"
             make -C "$KDIR" -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
-              KCFLAGS="-D__ANDROID_COMMON_KERNEL__" modules 2>&1 | tail -20
+              KCFLAGS="-D__ANDROID_COMMON_KERNEL__ $KCEXTRA" modules 2>&1 | tail -20
           fi
           [ -s "$KDIR/Module.symvers" ] || { echo "::error::Module.symvers 生成失败"; exit 1; }
           echo "Module.symvers 行数: $(wc -l < "$KDIR/Module.symvers")"
