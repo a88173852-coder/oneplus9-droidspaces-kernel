@@ -264,7 +264,8 @@ jobs:
           #   ② 三个 wrapper 带 __nocfi → 没有 kCFI typeid，真被间接调到会 __cfi_check_fail。
           # 两道门都堵上（替换前先自证 typeid 一致，不一致就不换，不会 panic）。
           python3 patches/compat/patch_mount_hide.py "$KDIR/KernelSU/kernel/feature/mount_hide.c"
-          grep -q 'kCFI typeid 不匹配' "$KDIR/KernelSU/kernel/feature/mount_hide.c" \
+          # 判据用新逻辑独有的标识符 want_body，别用日志文案（文案一改动就误判失败）
+          grep -q 'want_body' "$KDIR/KernelSU/kernel/feature/mount_hide.c" \
             || { echo "::error::mount_hide 补丁没打上，模块挂载会对 app 全裸"; exit 1; }
           echo "mount_hide 补丁已注入"
 
