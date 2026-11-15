@@ -22,10 +22,15 @@ name: build-oneplus9-droidspaces
 #   5. 只开 Droidspaces 官方 GKI 清单里的项。CFS_BANDWIDTH / CGROUP_PIDS 不能开。
 #   6. 产物跑一遍厂商模块 CRC 校验，不匹配就别刷。
 
+# 失败时把 build.log 推到 ci-logs 分支：Actions 的日志/产物下载都要仓库权限，
+# 而分支是匿名的，这样本机随时能拉到完整编译日志定位问题。
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main, master, sukisu-stage-a, sukisu-stage-b]
     paths:
       - '.github/workflows/build-kernel.yml'
       - 'patches/**'
@@ -45,6 +50,11 @@ jobs:
       VENDOR_SHA: d95833d6520887112ffed6537bfbef5e28650ca1
       KDIR: src/kernel/msm-5.4
       TARGET_VERMAGIC: "-qgki-gd2a1055adeb0"
+      # SukiSU-Ultra v4.3.0 + 一加9 (5.4 非 GKI) 兼容移植，钉死 commit 保证可复现。
+      # 上游 SukiSU-Ultra 只面向 GKI 2.0(5.10+)，这个移植补了 5.4 缺的
+      # struct selinux_policy / copy_*_user_nofault / pmd_leaf / seccomp action_cache。
+      SUKISU_REPO: https://github.com/LingQingMC/OnePlus9_ColorOS_SukiSU_Kernel.git
+      SUKISU_SHA: f3c8c525275b5ec08cd95f60c1ec9c897b78fec9
 
     steps:
       - uses: actions/checkout@v4
@@ -174,9 +184,133 @@ jobs:
         run: |
           patch -d "$KDIR" -p1 --fuzz=3 --verbose < patches/droidspaces-5.4-kabi.patch
 
+      # ---- SukiSU-Ultra 集成（非 GKI 5.4 移植）----
+      # 只取最小改动，不照抄参考仓库那两个"整文件覆盖"的补丁：
+      #   a) drivers/Makefile + drivers/Kconfig：追加编译入口（各 2 行）
+      #   b) fs/namespace.c 末尾追加 path_umount：5.4 没有这个函数，
+      #      App Profile 的「按 App 卸载模块」在 <5.10 必须靠它（官方文档明确要求回移），
+      #      SUSFS 的 sus_mount 也依赖
+      #   c) security/selinux/ss/services.c：策略重载后重新注入 sepolicy，
+      #      否则 u:r:ksu:s0 会在 reload 后失效，表现为"su 时好时坏"
+      # 刻意不应用参考仓库的 kernel/module.c 补丁：那是把 CRC 校验放宽到直接放行。
+      # 我们是靠原厂 config + 原厂 clang 11.0.2 把 CRC 做对的，放宽等于放弃那层保护。
+      - name: Integrate SukiSU-Ultra (non-GKI 5.4 port)
+        run: |
+          set -euo pipefail
+          SRC=src/sukisu-src
+          rm -rf "$SRC" && mkdir -p "$SRC"
+          git init -q "$SRC"
+          git -C "$SRC" remote add origin "$SUKISU_REPO"
+          git -C "$SRC" fetch -q --depth=1 origin "$SUKISU_SHA"
+          git -C "$SRC" checkout -q FETCH_HEAD
+          echo "SukiSU 源: $(git -C "$SRC" log --oneline -1)"
+
+          # 参考仓库里残留的 *.bak2 / *.orig2 不进树
+          find "$SRC/KernelSU" -name '*.bak*' -delete
+          find "$SRC/KernelSU" -name '*.orig*' -delete
+
+          cp -a "$SRC/KernelSU" "$KDIR/KernelSU"
+          ln -sfn ../KernelSU/kernel "$KDIR/drivers/kernelsu"
+          grep -q 'obj-$(CONFIG_KSU)' "$KDIR/drivers/Makefile" \
+            || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$KDIR/drivers/Makefile"
+          grep -q 'drivers/kernelsu/Kconfig' "$KDIR/drivers/Kconfig" \
+            || printf '\nsource "drivers/kernelsu/Kconfig"\n' >> "$KDIR/drivers/Kconfig"
+
+          # 5.4 没有 linux/pgtable.h（5.8 才从 asm/pgtable.h 独立出来）
+          [ -f "$KDIR/include/linux/pgtable.h" ] \
+            || cp patches/include-linux-pgtable.h "$KDIR/include/linux/pgtable.h"
+
+          # 上游 KernelSU 只针对 GKI 2.0(>=5.10)，用到几个 5.10+ 才拆出来的独立头：
+          #   linux/minmax.h (5.10)、linux/hex.h (5.18)
+          # 5.4 里这些东西都在 linux/kernel.h，用薄封装头转发，不改 KSU 源码本体
+          for h in minmax.h hex.h; do
+            if [ ! -f "$KDIR/include/linux/$h" ]; then
+              cp "patches/compat/$h" "$KDIR/include/linux/$h"
+              echo "compat header: include/linux/$h"
+            fi
+          done
+
+          # 这棵树用 scripts/gcc-wrapper.py 把一切 warning 当 error（白名单机制）。
+          # KSU 的 selinux/rules_54.c include xfrm.h 时，原型里 struct common_audit_data
+          # 只是不完整类型前向声明（指针原型，不参与代码生成），clang 会打
+          # [-Wvisibility] → "error, forbidden warning: xfrm.h:62"。按这棵树自身的
+          # 设计意图，把这一条加进白名单，其余 warning 依然严格拦截。
+          sed -i '/^allowed_warnings = set(\[/a\    "xfrm.h:62",' "$KDIR/scripts/gcc-wrapper.py" \
+            && grep -n 'xfrm.h:62' "$KDIR/scripts/gcc-wrapper.py"
+
+          # 但白名单是精确匹配 "文件:行号"，xfrm.h 里 62/68 两处静态内联原型
+          # 都用了 struct common_audit_data（定义在 linux/lsm_audit.h），
+          # rules_54.c 没先包含它 → 逐行报 -Wvisibility，堵不完。
+          # 从根上消除：在 rules_54.c 的 include 块最前面补上定义该结构体的头。
+          # 插在 linux/version.h 之前（而不是文件第 1 行），避免挡住 SPDX 标识。
+          R54="$KDIR/drivers/kernelsu/selinux/rules_54.c"
+          if ! grep -q 'linux/lsm_audit.h' "$R54"; then
+            sed -i 's|^#include <linux/version.h>|#include <linux/lsm_audit.h>\n#include <linux/version.h>|' "$R54"
+            sed -n '23,26p' "$R54"
+          fi
+
+          # path_umount 追加到文件末尾：不占 hunk 上下文，后面叠 SUSFS 补丁不会打架
+          if ! grep -q 'KernelSU / SukiSU support for non-GKI kernels' "$KDIR/fs/namespace.c"; then
+            cat patches/sukisu-path_umount.c >> "$KDIR/fs/namespace.c"
+          fi
+
+          patch -d "$KDIR" -p1 --fuzz=3 --verbose < patches/sukisu-selinux-reload.patch
+
+          test -f "$KDIR/drivers/kernelsu/Kbuild" || { echo "::error::KSU 源码没就位"; exit 1; }
+          grep -q 'kernelsu-objs' "$KDIR/drivers/kernelsu/Kbuild" || { echo "::error::KSU Kbuild 异常"; exit 1; }
+          echo "KSU 源文件数: $(find "$KDIR/KernelSU/kernel" -name '*.c' | wc -l)"
+          grep -n 'CONFIG_KSU' "$KDIR/drivers/Makefile" "$KDIR/drivers/Kconfig"
+
+      # ---- stage-b：SUSFS 2.3.0（非 GKI 5.4 回移）----
+      # 补丁来自 kafuuchino-s/susfs4ksu 的 mix4-5.4 分支（2.3.0 回移），已 vendor 进仓库。
+      # 它按 KSU「manual hook」写的：fs/*.c 里会调 ksu_handle_execveat/faccessat/stat…
+      # SukiSU 走 tracepoint hook，符号名是 xxx_sucompat，所以打完补丁后要
+      # 用 patches/compat/odin_ksu_hooks.h（空实现）覆盖补丁自带的那份头，
+      # 否则链接期 undefined reference。这些 hook 属于 KSU 自己的 su 兼容，
+      # 与 SUSFS 的隐藏能力无关。
+      - name: Apply SUSFS 2.3.0 (non-GKI 5.4 backport)
+        run: |
+          set -euo pipefail
+
+          # SukiSU 的 Kconfig 里没有 KSU_SUSFS 这个开关（susfs.Kconfig 依赖它），补一个
+          if ! grep -q '^config KSU_SUSFS$' "$KDIR/KernelSU/kernel/Kconfig"; then
+            cat >> "$KDIR/KernelSU/kernel/Kconfig" <<'KCFG'
+
+config KSU_SUSFS
+	bool "Enable SUSFS support"
+	depends on KSU
+	default n
+	help
+	  Gate for SuSFS. The implementation comes from the non-GKI 5.4
+	  backport patch; this switch only exposes it to Kconfig.
+KCFG
+          fi
+          grep -n -A3 '^config KSU_SUSFS$' "$KDIR/KernelSU/kernel/Kconfig"
+
+          if ! patch -d "$KDIR" -p1 --fuzz=3 --verbose < patches/susfs-2.3.0-5.4.patch > /tmp/susfs-patch.log 2>&1; then
+            echo "::error::SUSFS 补丁没打干净"
+            grep -E 'FAILED|Hunk|Reversed|reject' /tmp/susfs-patch.log | head -30 || true
+            msg=$(grep -E 'FAILED|Hunk' /tmp/susfs-patch.log | head -12 | sed -e 's/%/%25/g' | awk 'NR>1{printf "%%0A"} {printf "%s", $0}')
+            echo "::error::SUSFS_HUNKS::$msg"
+            exit 1
+          fi
+          echo "打上的文件数: $(grep -cE '^patching file' /tmp/susfs-patch.log)"
+
+          # 换成 SukiSU 适配版 manual-hook 头（空实现）
+          cp patches/compat/odin_ksu_hooks.h "$KDIR/include/linux/odin_ksu_hooks.h"
+
+          # 落点自检
+          test -f "$KDIR/fs/susfs.c"                      || { echo "::error::fs/susfs.c 没落盘"; exit 1; }
+          test -f "$KDIR/include/linux/susfs.h"           || { echo "::error::include/linux/susfs.h 没落盘"; exit 1; }
+          grep -q 'susfs.o' "$KDIR/fs/Makefile"           || { echo "::error::fs/Makefile 没加 susfs.o"; exit 1; }
+          grep -q 'susfs.Kconfig' "$KDIR/fs/Kconfig"      || { echo "::error::fs/Kconfig 没 source susfs.Kconfig"; exit 1; }
+          grep -m1 'SUSFS_VERSION' "$KDIR/include/linux/susfs.h"
+          echo "susfs.c 行数: $(wc -l < "$KDIR/fs/susfs.c")"
+
       - name: Configure
         run: |
-          set -e
+          set -eE
+          trap 'rc=$?; echo "::error::Configure 第 $LINENO 行失败 rc=$rc: $BASH_COMMAND"' ERR
           export PATH="$HOME/clang/bin:$PATH"
           cp config/device-stock.config "$KDIR/.config"
 
@@ -188,9 +322,15 @@ jobs:
 
           # 叠加 Droidspaces 配置
           cat config/droidspaces.config >> "$KDIR/.config"
+          # 叠加 SukiSU 配置（CONFIG_KSU）
+          cat config/sukisu.config >> "$KDIR/.config"
+          # 叠加 SUSFS 配置（stage-b）
+          cat config/susfs.config >> "$KDIR/.config"
 
           make -C "$KDIR" ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
-            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" olddefconfig
+            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" olddefconfig 2>&1 | tee olddefconfig.log
+          echo "=== kconfig 告警/错误 ==="
+          grep -iE "warning|error|recursive" olddefconfig.log | head -30 || echo "  (none)"
 
           echo "=== 关键配置复查（依据 Droidspaces 官方 GKI 清单）==="
           # 缺任意一项：容器直接起不来 / 硬件不可用 —— 硬失败
@@ -229,7 +369,13 @@ jobs:
             if grep -q "^CONFIG_${sym}=y" "$KDIR/.config"; then
               printf "  ok    CONFIG_%s=y\n" "$sym"
             else
-              echo "::error::CONFIG_${sym} 被 olddefconfig 丢掉了，指纹会失效"; exit 1
+              echo "::error::CONFIG_${sym} 被 olddefconfig 丢掉了，指纹会失效"
+              echo "::warning::diag SPI: $(grep -E '^CONFIG_SPI(_MASTER)?=' "$KDIR/.config" | tr '\n' ' ')"
+              echo "::warning::diag OPLUS: $(grep -c '^CONFIG_OPLUS' "$KDIR/.config") 项, 指纹 Kconfig 引用: $(grep -c 'oplus_fp_drivers' "$KDIR/drivers/input/Kconfig" 2>/dev/null || echo NA)"
+              echo "::warning::diag Kconfig尾: $(tail -3 "$KDIR/drivers/Kconfig" | tr '\n' '|')"
+              echo "::warning::diag FINGERPRINT行: $(grep -n 'FINGERPRINT' "$KDIR/.config" | head -4 | tr '\n' '|' | cut -c1-260)"
+              echo "::warning::diag inputKconfig: $(grep -n 'oplus_fp_drivers' "$KDIR/drivers/input/Kconfig" | head -2 | tr '\n' '|') / INPUT=$(grep -E '^CONFIG_INPUT=' "$KDIR/.config")"
+              echo "::warning::diag olddefconfig: $(grep -iE 'warning|error' olddefconfig.log | head -3 | tr '\n' '|' | cut -c1-260)"
             fi
           done
           for sym in OPLUS_FEATURE_SCHED_ASSIST DEVTMPFS_MOUNT; do
@@ -238,6 +384,48 @@ jobs:
               || echo "::warning::CONFIG_${sym} 没开（原厂是开的，功能会缺失）"
           done
           echo "OPLUS 私有项数量: $(grep -c OPLUS "$KDIR/.config")"
+
+          # KSU 是硬失败项：KSU 依赖 KPROBES + EXT4_FS，任一不满足 olddefconfig 会把它悄悄丢掉，
+          # 编出来的内核看着正常、刷进去没有 root，最难排查。
+          if grep -q '^CONFIG_KSU=y' "$KDIR/.config"; then
+            printf "  ok    CONFIG_KSU=y\n"
+          else
+            echo "::error::CONFIG_KSU 被 olddefconfig 丢掉了（检查 KPROBES / EXT4_FS）"; exit 1
+          fi
+          for sym in KSU_MANUAL_SU; do
+            grep -q "^CONFIG_${sym}=y" "$KDIR/.config" \
+              && printf "  ok    CONFIG_%s=y\n" "$sym" \
+              || echo "::warning::CONFIG_${sym} 没开，授权链会依赖管理器常驻"
+          done
+          grep -q '^# CONFIG_KPM is not set' "$KDIR/.config" \
+            || echo "::warning::CONFIG_KPM 状态不是预期的关闭"
+
+          # ---- stage-b：SUSFS 必须真的开进去了 ----
+          # olddefconfig 对 depends 不满足的符号会静默丢弃，所以逐个 grep 验证。
+          for sym in KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT \
+                     KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+                     KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT \
+                     KSU_SUSFS_SUS_MAP; do
+            if grep -q "^CONFIG_${sym}=y" "$KDIR/.config"; then
+              printf "  ok    CONFIG_%s=y\n" "$sym"
+            else
+              echo "::error::CONFIG_${sym} 没开（SUSFS 的 depends 可能没满足：KSU / ARM64 / THREAD_INFO_IN_TASK）"
+              grep -nE "CONFIG_${sym}" "$KDIR/.config" || true
+              exit 1
+            fi
+          done
+
+      # 不管 Configure 成败都导出关键现场（annotation 匿名可读，日志要仓库权限）
+      - name: Dump config diagnostics
+        if: always()
+        run: |
+          C="$KDIR/.config"
+          [ -f "$C" ] || { echo "::warning::.config 不存在"; exit 0; }
+          echo "::warning::d1 CONFIG总数=$(grep -c '^CONFIG_' "$C") KSU=$(grep -c '^CONFIG_KSU' "$C")"
+          echo "::warning::d2 $(grep -n 'OPLUS_FINGERPRINT' "$C" | head -3 | tr '\n' '|' | cut -c1-300)"
+          echo "::warning::d3 $(grep -E '^CONFIG_(SPI|SPI_MASTER|INPUT)=' "$C" | tr '\n' ' ')"
+          echo "::warning::d4 kconf: $(grep -icE 'error' olddefconfig.log 2>/dev/null || echo NA) $(grep -iE 'error' olddefconfig.log 2>/dev/null | head -2 | tr '\n' '|' | cut -c1-260)"
+          echo "::warning::d5 $(tail -3 olddefconfig.log 2>/dev/null | tr '\n' '|' | cut -c1-260)"
 
       - name: Build Image
         run: |
@@ -250,6 +438,14 @@ jobs:
           ls -l "$KDIR/arch/arm64/boot/Image"
           echo "=== 产物自检 ==="
           grep -m2 '__cfi_slowpath' "$KDIR/System.map" || { echo "::error::System.map 里没有 __cfi_slowpath，CFI 没编进去"; exit 1; }
+          echo "=== KSU 符号自检 ==="
+          grep -c -E ' (ksu|kernelsu)_' "$KDIR/System.map" || true
+          grep -m5 -E ' (ksu_reapply_sepolicy_after_reload|ksu_supercall|kernelsu_init)$' "$KDIR/System.map" \
+            || { echo "::error::System.map 里找不到 KSU 符号，KSU 没编进内核"; exit 1; }
+          echo "=== SUSFS 符号自检 ==="
+          grep -m6 -E ' (susfs_init|susfs_add_sus_path|susfs_set_uname|susfs_start_sdcard_monitor|susfs_add_sus_map|susfs_set_cmdline_or_bootconfig)$' "$KDIR/System.map" \
+            || { echo "::error::System.map 里没有 susfs_* 符号，SUSFS 没编进去"; exit 1; }
+          grep -c 'susfs' "$KDIR/System.map"
           if strings "$KDIR/arch/arm64/boot/Image" | grep -q '5\.4\.254-qgki-gd2a1055adeb0+'; then
             echo "::error::内核版本串带了 + ，模块会全部拒载"; exit 1
           fi
@@ -262,6 +458,29 @@ jobs:
           fi
           [ -s "$KDIR/Module.symvers" ] || { echo "::error::Module.symvers 生成失败"; exit 1; }
           echo "Module.symvers 行数: $(wc -l < "$KDIR/Module.symvers")"
+
+      # 编译日志需要仓库权限才能下载，用 annotation 通道把关键错误带出来
+      - name: Report build errors
+        if: failure()
+        run: |
+          [ -f build.log ] || { echo "::error::没有 build.log，编译根本没开始"; exit 0; }
+          echo "::error::build.log 行数: $(wc -l < build.log)"
+          # 第一个 "Error N" 之前 25 行就是编译器真正的诊断，最值钱的一块
+          firsterr=$(grep -nE 'Error [0-9]+' build.log | head -1 | cut -d: -f1 || true)
+          if [ -n "${firsterr:-}" ]; then
+            slice=$(sed -n "$((firsterr>25 ? firsterr-25 : 1)),$((firsterr+2))p" build.log | cut -c1-300)
+            smsg=$(printf '%s' "$slice" | sed -e 's/%/%25/g' | awk 'NR>1{printf "%%0A"} {printf "%s", $0}')
+            echo "::error::FIRST_ERROR_SLICE::$smsg"
+          fi
+          # GitHub 每个 step 只保留 10 条 annotation，所以把内容压进 2 条长消息里；
+          # 换行用 %0A 编码，% 本身必须先转成 %25，否则日志里的 %xx 会被当成控制符。
+          hits=$(grep -nE -A2 "error:|fatal error|undefined reference|No rule to make|Error [0-9]|Killed" build.log \
+                 | sed -E 's#^([0-9]+)[-:].*/(src/kernel/[^:]+):#\1 \2:#' \
+                 | tail -40 | cut -c1-320 || true)
+          msg=$(printf '%s' "$hits" | sed -e 's/%/%25/g' | awk 'NR>1{printf "%%0A"} {printf "%s", $0}')
+          echo "::error::ERR_HITS::$msg"
+          tailmsg=$(tail -18 build.log | cut -c1-320 | sed -e 's/%/%25/g' | awk 'NR>1{printf "%%0A"} {printf "%s", $0}')
+          echo "::error::TAIL::$tailmsg"
 
       # 关键一步：拿新内核的 Module.symvers 跟手机里 99 个厂商模块要求的 CRC 对一遍
       #
@@ -291,10 +510,29 @@ jobs:
             src/kernel/msm-5.4/.config
             src/kernel/msm-5.4/System.map
             build.log
+            olddefconfig.log
             crc-report.txt
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 30
+
+      # 日志/产物走 API 下载都要仓库权限（403 / 401），但分支是公开可拉的。
+      # 编译失败时把 build.log 单独推到一个孤儿分支，本机 git fetch 就能拿到全量日志。
+      - name: Publish build log to ci-logs branch
+        if: failure()
+        continue-on-error: true
+        run: |
+          [ -f build.log ] || { echo "没有 build.log，跳过"; exit 0; }
+          work="$RUNNER_TEMP/ci-log-repo"
+          rm -rf "$work" && mkdir -p "$work"
+          cp build.log "$work/"
+          cd "$work"
+          git init -q
+          git checkout -q -b ci-logs
+          git -c user.name=ci-bot -c user.email=ci-bot@users.noreply.github.com add build.log
+          git -c user.name=ci-bot -c user.email=ci-bot@users.noreply.github.com commit -qm "build.log · run ${{ github.run_number }} · ${GITHUB_SHA:0:7}"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" ci-logs
+          echo "已推送 ci-logs 分支: $(git rev-parse --short HEAD)"
 
       - name: Gate
         if: steps.crc.outcome == 'failure'
