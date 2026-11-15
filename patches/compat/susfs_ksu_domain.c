@@ -30,3 +30,22 @@ bool susfs_is_current_ksu_domain(void)
 	return false;
 #endif
 }
+
+/*
+ * susfs_init() 在原 fork 里由 KSU 初始化流程显式调用，只做两件事：
+ *   INIT_WORK(&susfs_extra_works, …) / INIT_DELAYED_WORK(&sdcard_cleanup_dwork, …)
+ *
+ * SukiSU 没有这个调用点。不补的话这两个结构是 .bss 里的全零对象，
+ * 一旦有 sus_path_loop / sdcard monitor 相关路径 schedule 到它们，
+ * 就是「把 NULL 当函数指针调」的 oops——而且是随机时间点炸，最难查。
+ *
+ * late_initcall 比任何用户态 susfs 命令都早，安全。
+ */
+#include <linux/init.h>
+
+static int __init susfs_compat_init(void)
+{
+	susfs_init();
+	return 0;
+}
+late_initcall(susfs_compat_init);

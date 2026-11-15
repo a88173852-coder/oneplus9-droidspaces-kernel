@@ -342,6 +342,23 @@ jobs:
           grep -q 'susfs.o' "$KDIR/fs/Makefile"           || { echo "::error::fs/Makefile 没加 susfs.o"; exit 1; }
           grep -q 'susfs.Kconfig' "$KDIR/fs/Kconfig"      || { echo "::error::fs/Kconfig 没 source susfs.Kconfig"; exit 1; }
           grep -m1 'SUSFS_VERSION' "$KDIR/include/linux/susfs.h"
+
+          # 控制面自检：ksud 的每条 susfs 命令都走 reboot(0xDEADBEEF,0xFAFAFAFA,cmd,&payload)，
+          # 分发点就在这个头里的 ksu_handle_sys_reboot。若它被写回空宏 (-EINVAL)，
+          # 内核照样编得过、SUSFS 代码照样在，但 ksud 的每条命令都会被静默吞掉
+          # （RC=0、uname 不变、implementation=unsupported）—— 上一版就栽在这。
+          grep -q 'static inline int ksu_handle_sys_reboot' "$KDIR/include/linux/odin_ksu_hooks.h" \
+            || { echo "::error::odin_ksu_hooks.h 里的 sys_reboot 分发又退化成空宏了"; exit 1; }
+          for fn in susfs_add_sus_path susfs_set_uname susfs_add_sus_kstat \
+                    susfs_set_cmdline_or_bootconfig susfs_get_enabled_features; do
+            grep -q "$fn(arg)" "$KDIR/include/linux/odin_ksu_hooks.h" \
+              || { echo "::error::控制面缺少 $fn 的分发"; exit 1; }
+          done
+          # susfs_init 必须有人调，否则 susfs_extra_works / sdcard_cleanup_dwork 是未初始化对象
+          grep -q 'late_initcall(susfs_compat_init)' "$KDIR/fs/susfs.c" \
+            || { echo "::error::susfs_init 没被调用，workqueue 结构未初始化"; exit 1; }
+          echo "控制面自检通过：$(grep -c 'susfs_.*(arg)' "$KDIR/include/linux/odin_ksu_hooks.h") 个命令已接线"
+
           echo "susfs.c 行数: $(wc -l < "$KDIR/fs/susfs.c")"
 
       - name: Configure
