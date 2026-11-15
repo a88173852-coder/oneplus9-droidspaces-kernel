@@ -379,6 +379,13 @@ jobs:
         run: |
           [ -f build.log ] || { echo "::error::没有 build.log，编译根本没开始"; exit 0; }
           echo "::error::build.log 行数: $(wc -l < build.log)"
+          # 第一个 "Error N" 之前 25 行就是编译器真正的诊断，最值钱的一块
+          firsterr=$(grep -nE 'Error [0-9]+' build.log | head -1 | cut -d: -f1 || true)
+          if [ -n "${firsterr:-}" ]; then
+            slice=$(sed -n "$((firsterr>25 ? firsterr-25 : 1)),$((firsterr+2))p" build.log | cut -c1-300)
+            smsg=$(printf '%s' "$slice" | sed -e 's/%/%25/g' | awk 'NR>1{printf "%%0A"} {printf "%s", $0}')
+            echo "::error::FIRST_ERROR_SLICE::$smsg"
+          fi
           # GitHub 每个 step 只保留 10 条 annotation，所以把内容压进 2 条长消息里；
           # 换行用 %0A 编码，% 本身必须先转成 %25，否则日志里的 %xx 会被当成控制符。
           hits=$(grep -nE -A2 "error:|fatal error|undefined reference|No rule to make|Error [0-9]|Killed" build.log \
