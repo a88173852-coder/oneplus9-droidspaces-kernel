@@ -222,14 +222,20 @@ jobs:
             || { echo "::error::LOCALVERSION_AUTO 没关掉，vermagic 会带脏尾"; exit 1; }
 
           # 原厂功能对齐：源码把 OPPO_* 改名成 OPLUS_*，不显式开就会静默丢掉
-          for sym in OPLUS_FINGERPRINT OPLUS_FINGERPRINT_QCOM \
-                     OPLUS_FINGERPRINT_GOODIX_OPTICAL OPLUS_FINGERPRINT_JIIOV_OPTICAL \
-                     OPLUS_FEATURE_SCHED_ASSIST DEVTMPFS_MOUNT; do
+          # 指纹是硬失败项：COMMON 不开 -> 链接期 opticalfp_irq_handler_register
+          # 未定义；GOODIX/QCOM 不开 -> /dev/goodix_fp 不存在，HAL 起来就退出 255
+          for sym in OPLUS_FINGERPRINT OPLUS_FINGERPRINT_COMMON OPLUS_FINGERPRINT_QCOM \
+                     OPLUS_FINGERPRINT_GOODIX_OPTICAL OPLUS_FINGERPRINT_JIIOV_OPTICAL; do
             if grep -q "^CONFIG_${sym}=y" "$KDIR/.config"; then
               printf "  ok    CONFIG_%s=y\n" "$sym"
             else
-              echo "::warning::CONFIG_${sym} 没开（原厂是开的，功能会缺失）"
+              echo "::error::CONFIG_${sym} 被 olddefconfig 丢掉了，指纹会失效"; exit 1
             fi
+          done
+          for sym in OPLUS_FEATURE_SCHED_ASSIST DEVTMPFS_MOUNT; do
+            grep -q "^CONFIG_${sym}=y" "$KDIR/.config" \
+              && printf "  ok    CONFIG_%s=y\n" "$sym" \
+              || echo "::warning::CONFIG_${sym} 没开（原厂是开的，功能会缺失）"
           done
           echo "OPLUS 私有项数量: $(grep -c OPLUS "$KDIR/.config")"
 
