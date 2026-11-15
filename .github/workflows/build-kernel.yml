@@ -229,7 +229,8 @@ jobs:
 
       - name: Configure
         run: |
-          set -e
+          set -eE
+          trap 'rc=$?; echo "::error::Configure 第 $LINENO 行失败 rc=$rc: $BASH_COMMAND"' ERR
           export PATH="$HOME/clang/bin:$PATH"
           cp config/device-stock.config "$KDIR/.config"
 
@@ -317,6 +318,18 @@ jobs:
           done
           grep -q '^# CONFIG_KPM is not set' "$KDIR/.config" \
             || echo "::warning::CONFIG_KPM 状态不是预期的关闭"
+
+      # 不管 Configure 成败都导出关键现场（annotation 匿名可读，日志要仓库权限）
+      - name: Dump config diagnostics
+        if: always()
+        run: |
+          C="$KDIR/.config"
+          [ -f "$C" ] || { echo "::warning::.config 不存在"; exit 0; }
+          echo "::warning::d1 CONFIG总数=$(grep -c '^CONFIG_' "$C") KSU=$(grep -c '^CONFIG_KSU' "$C")"
+          echo "::warning::d2 $(grep -n 'OPLUS_FINGERPRINT' "$C" | head -3 | tr '\n' '|' | cut -c1-300)"
+          echo "::warning::d3 $(grep -E '^CONFIG_(SPI|SPI_MASTER|INPUT)=' "$C" | tr '\n' ' ')"
+          echo "::warning::d4 kconf: $(grep -icE 'error' olddefconfig.log 2>/dev/null || echo NA) $(grep -iE 'error' olddefconfig.log 2>/dev/null | head -2 | tr '\n' '|' | cut -c1-260)"
+          echo "::warning::d5 $(tail -3 olddefconfig.log 2>/dev/null | tr '\n' '|' | cut -c1-260)"
 
       - name: Build Image
         run: |
