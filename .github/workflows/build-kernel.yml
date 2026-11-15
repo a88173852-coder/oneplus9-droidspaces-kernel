@@ -238,6 +238,17 @@ jobs:
           sed -i '/^allowed_warnings = set(\[/a\    "xfrm.h:62",' "$KDIR/scripts/gcc-wrapper.py" \
             && grep -n 'xfrm.h:62' "$KDIR/scripts/gcc-wrapper.py"
 
+          # 但白名单是精确匹配 "文件:行号"，xfrm.h 里 62/68 两处静态内联原型
+          # 都用了 struct common_audit_data（定义在 linux/lsm_audit.h），
+          # rules_54.c 没先包含它 → 逐行报 -Wvisibility，堵不完。
+          # 从根上消除：在 rules_54.c 的 include 块最前面补上定义该结构体的头。
+          # 插在 linux/version.h 之前（而不是文件第 1 行），避免挡住 SPDX 标识。
+          R54="$KDIR/drivers/kernelsu/selinux/rules_54.c"
+          if ! grep -q 'linux/lsm_audit.h' "$R54"; then
+            sed -i 's|^#include <linux/version.h>|#include <linux/lsm_audit.h>\n#include <linux/version.h>|' "$R54"
+            sed -n '23,26p' "$R54"
+          fi
+
           # path_umount 追加到文件末尾：不占 hunk 上下文，后面叠 SUSFS 补丁不会打架
           if ! grep -q 'KernelSU / SukiSU support for non-GKI kernels' "$KDIR/fs/namespace.c"; then
             cat patches/sukisu-path_umount.c >> "$KDIR/fs/namespace.c"
