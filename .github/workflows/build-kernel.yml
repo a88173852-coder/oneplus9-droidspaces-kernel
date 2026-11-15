@@ -372,16 +372,17 @@ jobs:
       - name: Report build errors
         if: failure()
         run: |
-          echo "::error::build.log 行数: $(wc -l < build.log 2>/dev/null || echo 0)"
-          # 头文件缺失：一次性列全（去重），免得一轮只暴露一个
-          grep -oE "fatal error: '[^']+' file not found" build.log 2>/dev/null \
-            | sort -u | head -10 | sed 's/^/::error::HDR /' || true
-          # 编译/链接错误：去重取前 10 条，砍掉 runner 的绝对路径前缀
-          grep -E "error:|undefined reference|No rule to make" build.log 2>/dev/null \
-            | sed -E 's#^.*/(src/kernel/[^:]+)#\1#' | sort -u | head -10 \
-            | cut -c1-400 | sed 's/^/::error::ERR /' || true
-          # 尾部现场
-          tail -12 build.log 2>/dev/null | cut -c1-400 | sed 's/^/::error::TAIL /' || true
+          [ -f build.log ] || { echo "::error::没有 build.log，编译根本没开始"; exit 0; }
+          echo "::error::build.log 行数: $(wc -l < build.log)"
+          # GitHub 每个 step 只保留 10 条 annotation，所以把内容压进 2 条长消息里；
+          # 换行用 %0A 编码，% 本身必须先转成 %25，否则日志里的 %xx 会被当成控制符。
+          hits=$(grep -nE "error:|fatal error|undefined reference|No rule to make|Error [0-9]|Killed" build.log \
+                 | sed -E 's#^([0-9]+):.*/(src/kernel/[^:]+):#\1 \2:#' \
+                 | tail -30 | cut -c1-320 || true)
+          msg=$(printf '%s' "$hits" | sed -e 's/%/%25/g' | awk 'NR>1{printf "%%0A"} {printf "%s", $0}')
+          echo "::error::ERR_HITS::$msg"
+          tailmsg=$(tail -18 build.log | cut -c1-320 | sed -e 's/%/%25/g' | awk 'NR>1{printf "%%0A"} {printf "%s", $0}')
+          echo "::error::TAIL::$tailmsg"
 
       # 关键一步：拿新内核的 Module.symvers 跟手机里 99 个厂商模块要求的 CRC 对一遍
       #
