@@ -22,6 +22,11 @@ name: build-oneplus9-droidspaces
 #   5. 只开 Droidspaces 官方 GKI 清单里的项。CFS_BANDWIDTH / CGROUP_PIDS 不能开。
 #   6. 产物跑一遍厂商模块 CRC 校验，不匹配就别刷。
 
+# 失败时把 build.log 推到 ci-logs 分支：Actions 的日志/产物下载都要仓库权限，
+# 而分支是匿名的，这样本机随时能拉到完整编译日志定位问题。
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
   push:
@@ -376,9 +381,9 @@ jobs:
           echo "::error::build.log 行数: $(wc -l < build.log)"
           # GitHub 每个 step 只保留 10 条 annotation，所以把内容压进 2 条长消息里；
           # 换行用 %0A 编码，% 本身必须先转成 %25，否则日志里的 %xx 会被当成控制符。
-          hits=$(grep -nE "error:|fatal error|undefined reference|No rule to make|Error [0-9]|Killed" build.log \
-                 | sed -E 's#^([0-9]+):.*/(src/kernel/[^:]+):#\1 \2:#' \
-                 | tail -30 | cut -c1-320 || true)
+          hits=$(grep -nE -A2 "error:|fatal error|undefined reference|No rule to make|Error [0-9]|Killed" build.log \
+                 | sed -E 's#^([0-9]+)[-:].*/(src/kernel/[^:]+):#\1 \2:#' \
+                 | tail -40 | cut -c1-320 || true)
           msg=$(printf '%s' "$hits" | sed -e 's/%/%25/g' | awk 'NR>1{printf "%%0A"} {printf "%s", $0}')
           echo "::error::ERR_HITS::$msg"
           tailmsg=$(tail -18 build.log | cut -c1-320 | sed -e 's/%/%25/g' | awk 'NR>1{printf "%%0A"} {printf "%s", $0}')
@@ -417,6 +422,24 @@ jobs:
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 30
+
+      # 日志/产物走 API 下载都要仓库权限（403 / 401），但分支是公开可拉的。
+      # 编译失败时把 build.log 单独推到一个孤儿分支，本机 git fetch 就能拿到全量日志。
+      - name: Publish build log to ci-logs branch
+        if: failure()
+        continue-on-error: true
+        run: |
+          [ -f build.log ] || { echo "没有 build.log，跳过"; exit 0; }
+          work="$RUNNER_TEMP/ci-log-repo"
+          rm -rf "$work" && mkdir -p "$work"
+          cp build.log "$work/"
+          cd "$work"
+          git init -q
+          git checkout -q -b ci-logs
+          git -c user.name=ci-bot -c user.email=ci-bot@users.noreply.github.com add build.log
+          git -c user.name=ci-bot -c user.email=ci-bot@users.noreply.github.com commit -qm "build.log · run ${{ github.run_number }} · ${GITHUB_SHA:0:7}"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" ci-logs
+          echo "已推送 ci-logs 分支: $(git rev-parse --short HEAD)"
 
       - name: Gate
         if: steps.crc.outcome == 'failure'
