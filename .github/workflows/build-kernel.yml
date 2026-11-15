@@ -230,6 +230,14 @@ jobs:
             fi
           done
 
+          # 这棵树用 scripts/gcc-wrapper.py 把一切 warning 当 error（白名单机制）。
+          # KSU 的 selinux/rules_54.c include xfrm.h 时，原型里 struct common_audit_data
+          # 只是不完整类型前向声明（指针原型，不参与代码生成），clang 会打
+          # [-Wvisibility] → "error, forbidden warning: xfrm.h:62"。按这棵树自身的
+          # 设计意图，把这一条加进白名单，其余 warning 依然严格拦截。
+          sed -i '/^allowed_warnings = set(\[/a\    "xfrm.h:62",' "$KDIR/scripts/gcc-wrapper.py" \
+            && grep -n 'xfrm.h:62' "$KDIR/scripts/gcc-wrapper.py"
+
           # path_umount 追加到文件末尾：不占 hunk 上下文，后面叠 SUSFS 补丁不会打架
           if ! grep -q 'KernelSU / SukiSU support for non-GKI kernels' "$KDIR/fs/namespace.c"; then
             cat patches/sukisu-path_umount.c >> "$KDIR/fs/namespace.c"
