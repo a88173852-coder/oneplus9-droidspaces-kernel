@@ -287,13 +287,12 @@ jobs:
             if grep -q "^CONFIG_${sym}=y" "$KDIR/.config"; then
               printf "  ok    CONFIG_%s=y\n" "$sym"
             else
-              # 临时降级为 warning：本轮先验证 KSU 是否能编过，指纹问题并行定位
-              echo "::warning::CONFIG_${sym} 被 olddefconfig 丢掉了"
+              echo "::error::CONFIG_${sym} 被 olddefconfig 丢掉了，指纹会失效"
               echo "::warning::diag SPI: $(grep -E '^CONFIG_SPI(_MASTER)?=' "$KDIR/.config" | tr '\n' ' ')"
               echo "::warning::diag OPLUS: $(grep -c '^CONFIG_OPLUS' "$KDIR/.config") 项, 指纹 Kconfig 引用: $(grep -c 'oplus_fp_drivers' "$KDIR/drivers/input/Kconfig" 2>/dev/null || echo NA)"
               echo "::warning::diag Kconfig尾: $(tail -3 "$KDIR/drivers/Kconfig" | tr '\n' '|')"
               echo "::warning::diag FINGERPRINT行: $(grep -n 'FINGERPRINT' "$KDIR/.config" | head -4 | tr '\n' '|' | cut -c1-260)"
-              echo "::warning::diag inputKconfig: $(grep -n 'oplus_fp_drivers' "$KDIR/drivers/input/Kconfig" | head -2 | tr '\n' '|') / INPUT=$(grep -E '^CONFIG_INPUT=' "$KDIR/.config")
+              echo "::warning::diag inputKconfig: $(grep -n 'oplus_fp_drivers' "$KDIR/drivers/input/Kconfig" | head -2 | tr '\n' '|') / INPUT=$(grep -E '^CONFIG_INPUT=' "$KDIR/.config")"
               echo "::warning::diag olddefconfig: $(grep -iE 'warning|error' olddefconfig.log | head -3 | tr '\n' '|' | cut -c1-260)"
             fi
           done
