@@ -254,6 +254,16 @@ jobs:
 
           patch -d "$KDIR" -p1 --fuzz=3 --verbose < patches/sukisu-selinux-reload.patch
 
+          # mount_hide 在本树（一加9 / 5.4 非 GKI）上装好钩子后自检失败：
+          #   "proc_mounts layout mismatch, not filtering"
+          # 于是 app 侧 /proc/self/mountinfo 仍是原始内容，检测软件的
+          # 挂载间隙 / 挂载异常 / Mount loophole / Magic Mount / loop device 全部命中。
+          # 改成运行期自定位 show 槽位（只写回精确等于已知 show 函数的 8 字节槽位）。
+          python3 patches/compat/patch_mount_hide.py "$KDIR/KernelSU/kernel/feature/mount_hide.c"
+          grep -q 'show slot at +%d bytes' "$KDIR/KernelSU/kernel/feature/mount_hide.c" \
+            || { echo "::error::mount_hide 补丁没打上，模块挂载会对 app 全裸"; exit 1; }
+          echo "mount_hide 补丁已注入"
+
           test -f "$KDIR/drivers/kernelsu/Kbuild" || { echo "::error::KSU 源码没就位"; exit 1; }
           grep -q 'kernelsu-objs' "$KDIR/drivers/kernelsu/Kbuild" || { echo "::error::KSU Kbuild 异常"; exit 1; }
           echo "KSU 源文件数: $(find "$KDIR/KernelSU/kernel" -name '*.c' | wc -l)"
