@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * SUSFS 2.3.0 的 5.4 回移补丁里，fs/*.c 的 hook 点是按某个 KSU 分支的
+ * SUSFS 2.3.0 的 5.4 回移补丁里，fs 目录下那些 .c 文件的 hook 点是按某个 KSU 分支的
  * 「manual hook」写的：补丁自带一份 include/linux/odin_ksu_hooks.h，声明
  * ksu_handle_execveat / faccessat / stat / setresuid / sys_read / sys_reboot …
  * 并在 fs、kernel 里直接调用。
