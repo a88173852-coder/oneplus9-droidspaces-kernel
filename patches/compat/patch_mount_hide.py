@@ -110,5 +110,34 @@ for fn in ("ksu_show_vfsmnt", "ksu_show_mountinfo", "ksu_show_vfsstat"):
     src = src.replace(old_sig, new_sig, 1)
     print("② %s 去掉 __nocfi（补 typeid）" % fn)
 
+# ---- ③ 诊断期临时插桩（定位完把 DBG 改成 False 即可全撤）----
+DBG = True
+if DBG:
+    MARK_DBG = "MH_DBG"
+    if MARK_DBG in src:
+        print("③ 诊断插桩已存在，跳过")
+    else:
+        # 三个 .open shim 的入口：证明钩子到底有没有被调用
+        for tag, orig in (("mounts", "ksu_orig_mounts_open"),
+                          ("mountinfo", "ksu_orig_mountinfo_open"),
+                          ("mountstats", "ksu_orig_mountstats_open")):
+            old = "    int ret = %s(inode, file);" % orig
+            new = ('    pr_info("MH_DBG %s_open uid=%%d hide=%%d\\n", current_uid().val,\n'
+                   '            ksu_should_hide_mount_for_current());\n'
+                   '    int ret = %s(inode, file);' % (tag, orig))
+            if old not in src:
+                sys.exit("锚点没找到：%s 的 open shim 与预期不一致" % tag)
+            src = src.replace(old, new, 1)
+
+        # install_filter 的四个出口：证明它走到了哪一步
+        old = "    if (!m || !m->private)\n        return 0;"
+        new = ('    pr_info("MH_DBG install_filter file=%px m=%px priv=%px\\n",\n'
+               '            (void *)file, (void *)m, m ? (void *)m->private : NULL);\n'
+               '    if (!m || !m->private)\n        return 0;')
+        if old not in src:
+            sys.exit("锚点没找到：install_filter 的 !m 判空与预期不一致")
+        src = src.replace(old, new, 1)
+        print("③ 诊断插桩已注入")
+
 open(PATH, "w").write(src)
 print("mount_hide 补丁注入完成")
