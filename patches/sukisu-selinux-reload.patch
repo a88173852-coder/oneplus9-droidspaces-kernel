@@ -1,0 +1,29 @@
+--- a/security/selinux/ss/services.c
++++ b/security/selinux/ss/services.c
+@@ -54,6 +54,10 @@
+ #include "avc.h"
+ #include "avc_ss.h"
+ #include "security.h"
++
++#ifdef CONFIG_KSU
++extern void ksu_reapply_sepolicy_after_reload(void);
++#endif
+ #include "context.h"
+ #include "policydb.h"
+ #include "sidtab.h"
+@@ -2287,6 +2291,15 @@
+ 	selinux_netlbl_cache_invalidate();
+ 	selinux_xfrm_notify_policyload();
+ 
++#ifdef CONFIG_KSU
++	/*
++	 * SukiSU: the policydb was just replaced wholesale (memcpy above), so
++	 * any sepolicy rules injected earlier are gone.  Re-apply them now that
++	 * the final policy is installed, so u:r:ksu:s0 stays resolvable.
++	 */
++	ksu_reapply_sepolicy_after_reload();
++#endif
++
+ 	rc = 0;
+ 	goto out;
+ 

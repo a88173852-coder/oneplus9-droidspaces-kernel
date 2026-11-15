@@ -1,0 +1,8 @@
+# 构建产物与本地缓存，不进仓库
+artifacts/
+artifacts.zip
+.remote/
+src/
+build.log
+crc-report.txt
+*.img

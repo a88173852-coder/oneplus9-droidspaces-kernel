@@ -1,0 +1,8 @@
+# 补丁与脚本必须是 LF，CRLF 会让 patch/diff 直接失败
+*.patch text eol=lf
+*.config text eol=lf
+*.yml text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.sh text eol=lf
+*.py text eol=lf

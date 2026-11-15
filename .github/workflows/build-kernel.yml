@@ -249,10 +249,8 @@ jobs:
             sed -n '23,26p' "$R54"
           fi
 
-          # path_umount 追加到文件末尾：不占 hunk 上下文，后面叠 SUSFS 补丁不会打架
-          if ! grep -q 'KernelSU / SukiSU support for non-GKI kernels' "$KDIR/fs/namespace.c"; then
-            cat patches/sukisu-path_umount.c >> "$KDIR/fs/namespace.c"
-          fi
+          # path_umount 留到 stage-b 的 SUSFS 补丁之后再追加：
+          # SUSFS 的 namespace.c 最后一个 hunk 就在文件末尾，先追加会改动它的上下文。
 
           patch -d "$KDIR" -p1 --fuzz=3 --verbose < patches/sukisu-selinux-reload.patch
 
@@ -287,8 +285,49 @@ jobs:
           fi
           echo "打上的文件数: $(grep -cE '^patching file' /tmp/susfs-patch.log)"
 
-          # 换成 SukiSU 适配版 manual-hook 头（空实现）
+          # ---- 把补丁里 KSU 侧的三处接线改成 SukiSU 的写法 ----
+          # 1) 补丁写的是 ReSukiSU 那套：ksu_su_compat_enabled 是 static_key_true。
+          #    SukiSU 里它是普通 bool（feature/sucompat.c），类型不符直接编不过，
+          #    所以连声明带 static_branch_likely() 一起换成 bool 直读。
+          for f in fs/exec.c fs/open.c fs/stat.c; do
+            sed -i \
+              -e 's|extern struct static_key_true ksu_su_compat_enabled;|extern bool ksu_su_compat_enabled;|' \
+              -e 's|static_branch_likely(&ksu_su_compat_enabled)|ksu_su_compat_enabled|g' \
+              "$KDIR/$f"
+          done
+          # 2) drivers/input/input.c 用的是 ksu_is_input_hook_enabled 静态键，
+          #    SukiSU 根本没有这个符号 → 整个 if 去掉，调用点由垫片宏抹平。
+          sed -i \
+            -e '/extern struct static_key_true ksu_is_input_hook_enabled;/d' \
+            -e '/if (static_branch_unlikely(&ksu_is_input_hook_enabled))/d' \
+            "$KDIR/drivers/input/input.c"
+
+          # 3) 换掉补丁自带的 manual-hook 头（里面有会撞签名的 extern 声明），
+          #    改用 patches/compat/odin_ksu_hooks.h 的宏版本
           cp patches/compat/odin_ksu_hooks.h "$KDIR/include/linux/odin_ksu_hooks.h"
+
+          # path_umount 现在补：SUSFS 补丁已经把 namespace.c 改完，追加不会打架
+          if ! grep -q 'KernelSU / SukiSU support for non-GKI kernels' "$KDIR/fs/namespace.c"; then
+            cat patches/sukisu-path_umount.c >> "$KDIR/fs/namespace.c"
+          fi
+
+          # ---- 接线自检：任何一处没改成功，后面都要白编 40 分钟 ----
+          bad=0
+          if grep -rq 'static_branch_likely(&ksu_su_compat_enabled)' "$KDIR/fs"; then
+            echo "::error::ksu_su_compat_enabled 的 static_branch 没替换干净"; bad=1
+          fi
+          if grep -rq 'struct static_key_true ksu_su_compat_enabled' "$KDIR/fs"; then
+            echo "::error::ksu_su_compat_enabled 类型没改成 bool"; bad=1
+          fi
+          if grep -q 'ksu_is_input_hook_enabled' "$KDIR/drivers/input/input.c"; then
+            echo "::error::input.c 的静态键没清掉"; bad=1
+          fi
+          if ! grep -q 'ksu_handle_' "$KDIR/include/linux/odin_ksu_hooks.h"; then
+            echo "::error::垫片头丢了"; bad=1
+          fi
+          [ $bad -eq 0 ] || exit 1
+          echo "接线自检通过"
+          grep -n 'ksu_su_compat_enabled' "$KDIR/fs/open.c" | head -4
 
           # 落点自检
           test -f "$KDIR/fs/susfs.c"                      || { echo "::error::fs/susfs.c 没落盘"; exit 1; }

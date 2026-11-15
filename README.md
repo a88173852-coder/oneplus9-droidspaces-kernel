@@ -188,20 +188,67 @@ Wed Apr 16 13:02:59 CST 2025
 - 每个模块依赖的导出符号 → 它编译时看到的 CRC（取自 `.ko` 的 `__versions` 段）
 - vermagic：`5.4.254-qgki-gd2a1055adeb0 SMP preempt mod_unload modversions aarch64`
 
-编译完成后，CI 会把新内核的 `Module.symvers` 跟这份基线逐条比对（2098 条依赖），
-不匹配就让 job 变红。**这是刷机前唯一的客观保险**，比"试试看"强。
+编译完成后，CI 会把新内核的 `Module.symvers` 跟这份基线逐条比对，不匹配就让 job 变红。
+**这是刷机前唯一的客观保险**，比"试试看"强。
+
+比对时分两类来源（`checks/stock-vmlinux-exports.json.gz` 是从原厂 `/proc/kallsyms` 里
+`__ksymtab_<sym>` 条目提取的原厂 vmlinux 导出符号表）：
+
+- 原厂由 **vmlinux** 导出 → 由我们重编的内核提供，**必须逐个校验 CRC**
+- 原厂由**另一个 .ko** 导出（如 `q6_dlkm` 导出 `adm_*`、`swr_dlkm` 导出 `__devm_regmap_init_swr`）
+  → 那些 .ko 是原厂原件、不动，互相之间天然自洽，不参与校验
+
+不分类会把后一类全误报成"未导出"（第一版就踩了这个坑：491 个假失败，实际 0 个真失败）。
 
 手册里核对一遍：
 
 ```bash
 cd kernel-check
-python check_vendor_crc.py baseline vendor-modules -o my-baseline.json   # 重新生成基线
-python check_vendor_crc.py verify my-baseline.json path/to/Module.symvers
+python check_vendor_crc.py baseline vendor-modules -o my-baseline.json                  # 重新生成基线
+python check_vendor_crc.py exports kallsyms.txt -o stock-vmlinux-exports.json          # 原厂导出符号表
+python check_vendor_crc.py verify my-baseline.json Module.symvers stock-vmlinux-exports.json
 ```
 
-## 还没有验证的部分
+## 实机验证结果（2026-11-15，一加9 / ColorOS 14 / b 槽）
 
-- 这套配置只在一加9 + LineageOS 上被别人验证过，**ColorOS 14 上没人跑过**，你是第一个。
-- OPPO 的 QGKI 树里有一堆 `CONFIG_OPLUS_*` 私有项，olddefconfig 可能会丢掉个别项，
-  workflow 会把实际生效的 `.config` 一起传上来，可以对照 `config/device-stock.config` 看差异。
-- 万一编译报错（大概率是 LTO + clang 11 的环境问题），把 `build.log` 发我，改 workflow 再跑。
+- 编译：成功，Image 42.5 MB，`5.4.254-qgki-gd2a1055adeb0`，无 `+` 尾巴
+- CRC：6941 条依赖，**0 条不一致**
+- 刷入：`fastboot flash boot_b` 5 秒，**一次开机成功**（`sys.boot_completed=1`）
+- 命名空间实测：`unshare -m / -u / -i / -p / -U / -n` **全部 OK**
+  （原厂内核时 `-p`、`-i`、`-U` 都是 EINVAL）
+- Magisk 30600 正常，62 个模块加载，5G 注册与数据连接正常，相机节点存在，无 panic/Oops
+
+## 已知现象：开机弹「设备内部出现了问题」
+
+刷完这版内核，开机会有一次系统弹窗：
+
+> 你的设备内部出现了问题，请联系您的设备制造商了解详情
+
+**这是预期行为，不影响任何功能。** 原因如下：
+
+`ro.treble.enabled=true` 时，框架的 `Build.isBuildConsistent()` 会调用
+`VintfObject.verifyWithoutAvb()` 做 VINTF 兼容性校验。其中「内核段」会拿
+`/proc/config.gz` 里实际生效的配置，逐条对照 `/system/etc/vintf/compatibility_matrix.*.xml`
+里 `<kernel>` 的要求。Android 14 的矩阵里有两条**要求为 `n`**：
+
+| 配置项 | 矩阵要求 | 本内核 | 说明 |
+|---|---|---|---|
+| `CONFIG_SYSVIPC` | **n** | y | **Droidspaces / systemd 必需，无法去掉** |
+| `CONFIG_IP6_NF_NAT` | n | y | 仅 NAT66 用，可选 |
+
+原厂内核 248 项全部满足；本内核因 `SYSVIPC=y` 不满足 → 校验失败 → 弹窗。
+日志可查：`logcat | grep "Vendor interface is incompatible"` → `error=1`。
+
+**结论：这是"在 Android 14 上跑 systemd 容器"的固有代价**，Android 14 的内核合规矩阵
+禁止 `SYSVIPC`。想要弹窗消失只有两条路：
+
+1. 让框架走非 Treble 分支：`ro.treble.enabled=false`（Magisk `system.prop` 即可，可逆）
+2. 改 `framework.jar` 让 `isBuildConsistent()` 恒返回 true（需要改 /system，不推荐）
+
+## 还没验证的部分
+
+- 这套配置只在一加9 + LineageOS 上被别人验证过，**ColorOS 14 上没人跑过**，本仓库是首例。
+- OPPO 的 QGKI 树里有一堆 `CONFIG_OPLUS_*` 私有项，且新源码把 `OPPO_*` 改名成 `OPLUS_*`，
+  olddefconfig 会静默丢掉旧名项（指纹就是这样丢的，已在 `config/droidspaces.config` 里补齐）。
+  实际生效的 `.config` 会随产物上传，可对照 `config/device-stock.config` 看差异。
+
