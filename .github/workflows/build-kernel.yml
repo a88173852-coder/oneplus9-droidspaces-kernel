@@ -215,6 +215,16 @@ jobs:
           [ -f "$KDIR/include/linux/pgtable.h" ] \
             || cp patches/include-linux-pgtable.h "$KDIR/include/linux/pgtable.h"
 
+          # 上游 KernelSU 只针对 GKI 2.0(>=5.10)，用到几个 5.10+ 才拆出来的独立头：
+          #   linux/minmax.h (5.10)、linux/hex.h (5.18)
+          # 5.4 里这些东西都在 linux/kernel.h，用薄封装头转发，不改 KSU 源码本体
+          for h in minmax.h hex.h; do
+            if [ ! -f "$KDIR/include/linux/$h" ]; then
+              cp "patches/compat/$h" "$KDIR/include/linux/$h"
+              echo "compat header: include/linux/$h"
+            fi
+          done
+
           # path_umount 追加到文件末尾：不占 hunk 上下文，后面叠 SUSFS 补丁不会打架
           if ! grep -q 'KernelSU / SukiSU support for non-GKI kernels' "$KDIR/fs/namespace.c"; then
             cat patches/sukisu-path_umount.c >> "$KDIR/fs/namespace.c"
@@ -363,8 +373,15 @@ jobs:
         if: failure()
         run: |
           echo "::error::build.log 行数: $(wc -l < build.log 2>/dev/null || echo 0)"
-          grep -nE "error:|Error [0-9]+|undefined reference|fatal error|No rule to make" build.log 2>/dev/null \
-            | head -8 | cut -c1-380 | sed 's/^/::error::b: /' || true
+          # 头文件缺失：一次性列全（去重），免得一轮只暴露一个
+          grep -oE "fatal error: '[^']+' file not found" build.log 2>/dev/null \
+            | sort -u | head -10 | sed 's/^/::error::HDR /' || true
+          # 编译/链接错误：去重取前 10 条，砍掉 runner 的绝对路径前缀
+          grep -E "error:|undefined reference|No rule to make" build.log 2>/dev/null \
+            | sed -E 's#^.*/(src/kernel/[^:]+)#\1#' | sort -u | head -10 \
+            | cut -c1-400 | sed 's/^/::error::ERR /' || true
+          # 尾部现场
+          tail -12 build.log 2>/dev/null | cut -c1-400 | sed 's/^/::error::TAIL /' || true
 
       # 关键一步：拿新内核的 Module.symvers 跟手机里 99 个厂商模块要求的 CRC 对一遍
       #
