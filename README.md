@@ -98,6 +98,34 @@ adb shell su -c 'unshare -U true && echo USER_OK'
 
 ## 这个仓库做了什么
 
+### 为什么必须拉两个仓库（最容易踩的坑）
+
+OnePlusOSS 的内核仓库**单独克隆是编不了的**。它里面有 114 个符号链接指向 `vendor/oplus/...`，
+那是 OPPO 的 vendor 内核扩展，存放在**另一个仓库**里：
+
+```
+kernel/sched_assist      -> ../../../vendor/oplus/kernel/oplus_performance/sched_assist/
+include/linux/sched_assist -> ../../../../vendor/oplus/kernel/oplus_performance/sched_assist/
+drivers/soc/oplus/midas  -> ../../../vendor/oplus/kernel/oplus_performance/...
+mm/task_mem、net/oplus_modules、fs/oplus_erofs、drivers/power/oplus …… 同
+```
+
+原厂是在完整 Android 源码树里编的，所以链接能解析。目录布局必须还原成：
+
+```
+src/kernel/msm-5.4/   <- OnePlusOSS/android_kernel_oneplus_sm8350
+src/vendor/           <- OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8350 的 vendor/ 子树
+```
+
+两个仓库同一分支 `oneplus/sm8350_u_14.0.0_oneplus9`，HEAD 提交是**同一天**（内核 `9e38a9f`、
+vendor `d95833d`，2025-12-15），版本严格对应。workflow 里已固化这两个 SHA 并在拉取后校验断链是否解决。
+
+> 不补这棵树会在 `olddefconfig` 阶段直接失败：
+> `init/Kconfig:793: can't open file "kernel/sched_assist/Kconfig"`
+> 而这个特性在原厂内核里是真开着的（`CONFIG_OPLUS_FEATURE_SCHED_ASSIST=y`，
+> 手机 kallsyms 里有 75 个 `sched_assist` 符号），关掉它会让 `task_struct` 布局变化、
+> 大片导出符号 CRC 改变，厂商模块全部拒载。
+
 ### 补丁（`patches/droidspaces-5.4-kabi.patch`）
 
 改 2 个文件，把 SYSVIPC / POSIX_MQUEUE 需要的字段放进 Android 预留的 ABI padding 槽位：

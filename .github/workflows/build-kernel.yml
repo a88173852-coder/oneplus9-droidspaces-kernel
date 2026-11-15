@@ -108,6 +108,24 @@ jobs:
           sed -i 's|res="$res${scm:++}"|res="$res"|' "$KDIR/scripts/setlocalversion"
           grep -n 'res="\$res' "$KDIR/scripts/setlocalversion" | head -3
 
+      # OPPO 源码里存在 #include <../sched/sched.h> 这种尖括号相对路径，
+      # 它依赖原厂私有构建里的 -I 搜索路径，公开树里 clang 直接报
+      # "file not found with <angled> include; use quotes instead"。
+      # 改成引号形式后按包含文件所在目录解析，语义与原意相同。
+      - name: Normalise angled relative includes
+        run: |
+          set -e
+          changed=0
+          while IFS= read -r f; do
+            sed -i -E 's@^([[:space:]]*#[[:space:]]*include[[:space:]]*)<((\.\./)+[^>]*)>@\1"\2"@' "$f"
+            echo "  fixed: ${f#src/}"
+            changed=$((changed+1))
+          done < <(grep -rlE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<(\.\./)+' \
+                     --include='*.c' --include='*.h' --include='*.S' "$KDIR" src/vendor || true)
+          echo "共修复 $changed 个文件"
+          # 确认 rwsem.c 这个已知触发点已经改好
+          grep -n 'sched/sched.h' "$KDIR/kernel/locking/rwsem.c" | head -3
+
       - name: Fetch AOSP clang (clang 11.0.2 / r383902b)
         run: |
           mkdir -p "$HOME/clang"
