@@ -291,7 +291,9 @@ jobs:
               echo "::warning::diag SPI: $(grep -E '^CONFIG_SPI(_MASTER)?=' "$KDIR/.config" | tr '\n' ' ')"
               echo "::warning::diag OPLUS: $(grep -c '^CONFIG_OPLUS' "$KDIR/.config") 项, 指纹 Kconfig 引用: $(grep -c 'oplus_fp_drivers' "$KDIR/drivers/input/Kconfig" 2>/dev/null || echo NA)"
               echo "::warning::diag Kconfig尾: $(tail -3 "$KDIR/drivers/Kconfig" | tr '\n' '|')"
-              echo "::warning::diag olddefconfig: $(grep -iE 'warning|error' olddefconfig.log | head -3 | tr '\n' '|')"
+              echo "::warning::diag FINGERPRINT行: $(grep -n 'FINGERPRINT' "$KDIR/.config" | head -4 | tr '\n' '|' | cut -c1-260)"
+              echo "::warning::diag inputKconfig: $(grep -n 'oplus_fp_drivers' "$KDIR/drivers/input/Kconfig" | head -2 | tr '\n' '|') / INPUT=$(grep -E '^CONFIG_INPUT=' "$KDIR/.config")
+              echo "::warning::diag olddefconfig: $(grep -iE 'warning|error' olddefconfig.log | head -3 | tr '\n' '|' | cut -c1-260)"
             fi
           done
           for sym in OPLUS_FEATURE_SCHED_ASSIST DEVTMPFS_MOUNT; do
@@ -343,6 +345,14 @@ jobs:
           fi
           [ -s "$KDIR/Module.symvers" ] || { echo "::error::Module.symvers 生成失败"; exit 1; }
           echo "Module.symvers 行数: $(wc -l < "$KDIR/Module.symvers")"
+
+      # 编译日志需要仓库权限才能下载，用 annotation 通道把关键错误带出来
+      - name: Report build errors
+        if: failure()
+        run: |
+          echo "::error::build.log 行数: $(wc -l < build.log 2>/dev/null || echo 0)"
+          grep -nE "error:|Error [0-9]+|undefined reference|fatal error|No rule to make" build.log 2>/dev/null \
+            | head -8 | cut -c1-380 | sed 's/^/::error::b: /' || true
 
       # 关键一步：拿新内核的 Module.symvers 跟手机里 99 个厂商模块要求的 CRC 对一遍
       #
