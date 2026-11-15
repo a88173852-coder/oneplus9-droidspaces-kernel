@@ -285,6 +285,19 @@ jobs:
           fi
           echo "打上的文件数: $(grep -cE '^patching file' /tmp/susfs-patch.log)"
 
+          # 落点审计：sus_path 的钩子全在 fs/namei.c 里，必须确认它真的写进去了
+          echo "=== namei/stat 相关 hunk 的落点（offset 为正说明上下文有偏移）==="
+          grep -E 'patching file fs/(namei|stat|open|readdir)\.c|Hunk #[0-9]+ (succeeded|FAILED)' \
+            /tmp/susfs-patch.log | head -40 || true
+          echo "=== fs/namei.c 里 susfs_is_inode_sus_path 的调用行 ==="
+          grep -n 'susfs_is_inode_sus_path' "$KDIR/fs/namei.c" || echo "!! namei.c 里一个都没有"
+          echo "=== lookup_last 实际内容 ==="
+          awk '/static inline int lookup_last\(struct nameidata \*nd\)/,/^}/' "$KDIR/fs/namei.c" | head -16
+          echo "=== link_path_walk_inode 循环开头的钩子 ==="
+          grep -n -A5 'struct dentry \*dentry = nd->path.dentry;' "$KDIR/fs/namei.c" | head -20
+          echo "=== ND_ 宏在 susfs_def.h 的取值 ==="
+          grep -n 'define ND_STATE_LOOKUP_LAST\|define ND_STATE_OPEN_LAST\|define ND_FLAGS_LOOKUP_LAST' "$KDIR/include/linux/susfs_def.h"
+
           # ---- 把补丁里 KSU 侧的三处接线改成 SukiSU 的写法 ----
           # 1) 补丁写的是 ReSukiSU 那套：ksu_su_compat_enabled 是 static_key_true。
           #    SukiSU 里它是普通 bool（feature/sucompat.c），类型不符直接编不过，
@@ -379,6 +392,9 @@ jobs:
           # （定位完成后删掉这两行即可）
           python3 patches/compat/inject_probe.py "$KDIR/fs/susfs.c"
           grep -q 'PROBE uid=' "$KDIR/fs/susfs.c" || { echo "::error::sus_path 探点没注入"; exit 1; }
+          # namei 侧探点：区分「钩子没落盘」和「钩子落盘但没走到」
+          python3 patches/compat/inject_namei_probe.py "$KDIR/fs/namei.c"
+          grep -c 'NPROBE' "$KDIR/fs/namei.c" || echo "!! namei 探点未注入（见上一行结论）"
           echo "susfs.c 行数: $(wc -l < "$KDIR/fs/susfs.c")"
 
       - name: Configure
