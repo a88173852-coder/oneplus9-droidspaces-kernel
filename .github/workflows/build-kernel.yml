@@ -375,6 +375,10 @@ jobs:
             || { echo "::error::setresuid hook 又被抹成空宏了，sus_path 会全线失效"; exit 1; }
           echo "控制面自检通过：$(grep -c 'susfs_.*(arg)' "$KDIR/include/linux/odin_ksu_hooks.h") 个命令已接线"
 
+          # 临时探点：sus_path 添加成功但完全不拦截，需要内核自报三个条件的实际值
+          # （定位完成后删掉这两行即可）
+          python3 patches/compat/inject_probe.py "$KDIR/fs/susfs.c"
+          grep -q 'PROBE uid=' "$KDIR/fs/susfs.c" || { echo "::error::sus_path 探点没注入"; exit 1; }
           echo "susfs.c 行数: $(wc -l < "$KDIR/fs/susfs.c")"
 
       - name: Configure
