@@ -43,9 +43,14 @@ bool susfs_is_current_ksu_domain(void)
  */
 #include <linux/init.h>
 
-static int __init susfs_compat_init(void)
+/*
+ * 故意不叫 susfs_*：initcall 会以 __initcall_<n>_<uniq>_<名字><级别> 的形式
+ * 留在 kallsyms 里，CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS 只过滤 susfs_ 前缀，
+ * 名字里带 susfs 就会漏一个符号出去（实测 __initcall_255_1653_susfs_compat_init7）。
+ */
+static int __init fs_compat_late_init(void)
 {
 	susfs_init();
 	return 0;
 }
-late_initcall(susfs_compat_init);
+late_initcall(fs_compat_late_init);

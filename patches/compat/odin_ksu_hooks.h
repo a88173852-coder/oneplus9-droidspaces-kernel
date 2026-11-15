@@ -48,8 +48,41 @@
 #define ksu_handle_vfs_fstat(fd, size)					do { } while (0)
 #define ksu_handle_faccessat(dfd, filename, mode, flags)		do { } while (0)
 #define ksu_handle_stat(dfd, filename, flags)				do { } while (0)
-#define ksu_handle_setresuid(ruid, euid, suid)				do { } while (0)
 #define ksu_handle_input_handle_event(type, code, value)		do { } while (0)
+
+/*
+ * ── ksu_handle_setresuid 是 sus_path 的开关，绝不能再抹掉 ──
+ *
+ * susfs_def.h 里：
+ *     susfs_is_current_proc_umounted_app()
+ *         == test_thread_flag(TIF_PROC_UMOUNTED) && current_uid() >= 10000
+ *
+ * 而 susfs_is_inode_sus_path() 第一句就是：
+ *     if (!susfs_is_current_proc_umounted_app()) return false;
+ *
+ * 也就是说：**这个线程标志没打上，sus_path / sus_map / open_redirect 全线失效**，
+ * 无论 add-sus-path 返回多成功（dmesg 里 flag 也确实置上了），app 侧都照样看得见。
+ * 上一版把 setresuid 抹成空宏，于是 20 项异常一项没降 —— 就是这个原因。
+ *
+ * 原 fork 的 KSU 在 __sys_setresuid() 里调 ksu_handle_setresuid()，顺手给切到
+ * app uid 的进程打上 TIF_PROC_UMOUNTED。SukiSU 没有这段，这里用宏在调用点直接补：
+ * 要求 euid >= 10000（Android app uid 起点），root/shell/system 都不受影响。
+ *
+ * 注意必须写成宏而不是函数：宏在使用点（kernel/sys.c 第 600 多行）展开，那时
+ * sched.h 已经进来，set_thread_flag() 可用；写成头文件里的 static inline 则会
+ * 因为本头被插在全文件第一行、sched.h 还没处理而编不过。
+ */
+#define TIF_PROC_UMOUNTED 33
+
+#ifdef CONFIG_KSU_SUSFS
+#define ksu_handle_setresuid(ruid, euid, suid)					\
+	do {									\
+		if ((unsigned int)(euid) >= 10000u)				\
+			set_thread_flag(TIF_PROC_UMOUNTED);			\
+	} while (0)
+#else
+#define ksu_handle_setresuid(ruid, euid, suid)				do { } while (0)
+#endif
 
 /* fs/exec.c 里 clear_thread_flag() 用；SukiSU 没占这个位 */
 #define TIF_PROC_IN_KSU_EXECVE 61

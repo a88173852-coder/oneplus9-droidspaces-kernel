@@ -355,8 +355,12 @@ jobs:
               || { echo "::error::控制面缺少 $fn 的分发"; exit 1; }
           done
           # susfs_init 必须有人调，否则 susfs_extra_works / sdcard_cleanup_dwork 是未初始化对象
-          grep -q 'late_initcall(susfs_compat_init)' "$KDIR/fs/susfs.c" \
+          grep -q 'late_initcall(fs_compat_late_init)' "$KDIR/fs/susfs.c" \
             || { echo "::error::susfs_init 没被调用，workqueue 结构未初始化"; exit 1; }
+          # sus_path 的开关：setresuid hook 必须真的打 TIF_PROC_UMOUNTED，
+          # 否则 susfs_is_current_proc_umounted_app() 恒 false，add-sus-path 全部空转
+          grep -q 'set_thread_flag(TIF_PROC_UMOUNTED)' "$KDIR/include/linux/odin_ksu_hooks.h" \
+            || { echo "::error::setresuid hook 又被抹成空宏了，sus_path 会全线失效"; exit 1; }
           echo "控制面自检通过：$(grep -c 'susfs_.*(arg)' "$KDIR/include/linux/odin_ksu_hooks.h") 个命令已接线"
 
           echo "susfs.c 行数: $(wc -l < "$KDIR/fs/susfs.c")"
