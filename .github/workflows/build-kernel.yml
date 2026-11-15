@@ -86,6 +86,10 @@ jobs:
           git -C src/vend checkout -q FETCH_HEAD
           echo "vendor: $(git -C src/vend log --oneline -1)"
           mv src/vend/vendor src/vendor
+          # techpack/{audio,camera,display,dataipa,video} 在内核仓库里是 git 子模块
+          # （mode 160000，克隆后为空目录），内容放在这个仓库的 kernel/msm-5.4 下，
+          # 必须叠加到内核目录上，否则报 techpack/audio/Makefile 不存在。
+          cp -a src/vend/kernel/msm-5.4/. "$KDIR/"
           rm -rf src/vend
 
           echo "=== 校验断链是否已解决 ==="
@@ -93,7 +97,9 @@ jobs:
                    include/linux/sched_assist \
                    drivers/soc/oplus/midas \
                    mm/task_mem \
-                   net/oplus_modules; do
+                   net/oplus_modules \
+                   techpack/audio/Makefile \
+                   techpack/display/Makefile; do
             if [ -e "$KDIR/$p" ]; then
               echo "  ok   $p"
             else
