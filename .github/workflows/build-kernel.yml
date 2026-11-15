@@ -311,6 +311,13 @@ jobs:
             cat patches/sukisu-path_umount.c >> "$KDIR/fs/namespace.c"
           fi
 
+          # 补丁假定 KSU 侧提供 susfs_ksu_sid / susfs_is_current_ksu_domain(),
+          # SukiSU 没有 → 追加等价实现到 fs/susfs.c 末尾（见该文件注释）
+          if ! grep -q 'susfs_is_current_ksu_domain(void)$' "$KDIR/fs/susfs.c"; then
+            cat patches/compat/susfs_ksu_domain.c >> "$KDIR/fs/susfs.c"
+          fi
+          grep -q '^u32 susfs_ksu_sid;' "$KDIR/fs/susfs.c" || { echo "::error::susfs_ksu_sid 没补上"; exit 1; }
+
           # ---- 接线自检：任何一处没改成功，后面都要白编 40 分钟 ----
           bad=0
           if grep -rq 'static_branch_likely(&ksu_su_compat_enabled)' "$KDIR/fs"; then
