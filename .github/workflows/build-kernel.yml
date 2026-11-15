@@ -220,6 +220,17 @@ jobs:
           grep -E '^CONFIG_LOCALVERSION' "$KDIR/.config"
           grep -q '^# CONFIG_LOCALVERSION_AUTO is not set' "$KDIR/.config" \
             || { echo "::error::LOCALVERSION_AUTO 没关掉，vermagic 会带脏尾"; exit 1; }
+
+          # 原厂功能对齐：源码把 OPPO_* 改名成 OPLUS_*，不显式开就会静默丢掉
+          for sym in OPLUS_FINGERPRINT OPLUS_FINGERPRINT_QCOM \
+                     OPLUS_FINGERPRINT_GOODIX_OPTICAL OPLUS_FINGERPRINT_JIIOV_OPTICAL \
+                     OPLUS_FEATURE_SCHED_ASSIST DEVTMPFS_MOUNT; do
+            if grep -q "^CONFIG_${sym}=y" "$KDIR/.config"; then
+              printf "  ok    CONFIG_%s=y\n" "$sym"
+            else
+              echo "::warning::CONFIG_${sym} 没开（原厂是开的，功能会缺失）"
+            fi
+          done
           echo "OPLUS 私有项数量: $(grep -c OPLUS "$KDIR/.config")"
 
       - name: Build Image
@@ -247,14 +258,21 @@ jobs:
           echo "Module.symvers 行数: $(wc -l < "$KDIR/Module.symvers")"
 
       # 关键一步：拿新内核的 Module.symvers 跟手机里 99 个厂商模块要求的 CRC 对一遍
+      #
+      # 必须带上 stock-vmlinux-exports.json：模块的依赖分两类来源，
+      #   a) vmlinux 导出 -> 由我们重编的内核提供，必须逐个校验 CRC；
+      #   b) 另一个 .ko 导出（q6_dlkm 导出 adm_*、swr_dlkm 导出 __devm_regmap_init_swr ...）
+      #      -> 那些 .ko 都是原厂原件不动，互相之间天然自洽。
+      # `make Image` 的 Module.symvers 只含 vmlinux 导出，不区分就会把 (b) 类误报成失败。
       - name: Verify vendor module CRCs
         id: crc
         continue-on-error: true
         run: |
           set -euo pipefail
           gunzip -c checks/vendor-crc-baseline.json.gz > /tmp/baseline.json
+          gunzip -c checks/stock-vmlinux-exports.json.gz > /tmp/vmlinux-exports.json
           ls -l "$KDIR/Module.symvers"
-          python3 checks/check_vendor_crc.py verify /tmp/baseline.json "$KDIR/Module.symvers" | tee crc-report.txt
+          python3 checks/check_vendor_crc.py verify /tmp/baseline.json "$KDIR/Module.symvers" /tmp/vmlinux-exports.json | tee crc-report.txt
 
       - name: Upload artifacts
         if: always()

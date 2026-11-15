@@ -6,7 +6,7 @@
   python check_vendor_crc.py baseline vendor-modules -o vendor-crc-baseline.json
 
   # 2) 用新编译内核的 Module.symvers 对比，判断能否安全刷入
-  python check_vendor_crc.py verify vendor-crc-baseline.json path/to/Module.symvers
+  python check_vendor_crc.py verify vendor-crc-baseline.json Module.symvers [stock-vmlinux-exports.json]
 
 原理:
   Android GKI/QGKI 内核开了 CONFIG_MODVERSIONS，每个厂商 .ko 的 __versions 段
@@ -14,16 +14,33 @@
   否则拒绝加载（insmod 报 "disagrees about version of symbol"）。
   厂商模块是预编译的、没有源码，所以只能让内核去迁就它们。
   因此在刷机前就能算出来会不会加载失败，不必拿手机冒险。
+
+为什么需要第三个参数（stock-vmlinux-exports.json）:
+  模块的依赖分两类来源：
+    a) vmlinux 导出 —— 由我们重编的内核提供，**必须逐个校验 CRC**；
+    b) 另一个 .ko 导出（如 q6_dlkm 导出 adm_*、swr_dlkm 导出 __devm_regmap_init_swr）
+       —— 这些 .ko 都是原厂原件、不动，互相之间天然自洽。
+  `make Image` 生成的 Module.symvers 只含 vmlinux 导出，因此 (b) 类符号必然
+  “查不到”。不区分就会误报成“会加载失败”。
+  该清单从原厂系统 /proc/kallsyms 里的 __ksymtab_<sym> 条目（不带 [module] 标记）
+  提取，即原厂 vmlinux 的导出符号全集。
+
+生成该清单:
+  adb shell su -c 'cat /proc/kallsyms' > kallsyms.txt
+  python check_vendor_crc.py exports kallsyms.txt -o stock-vmlinux-exports.json
 """
 
 import json
 import os
+import re
 import struct
 import sys
 
 SHT_SYMTAB = 2
 MODULE_NAME_LEN = 56          # 5.4 的 include/linux/module.h
 ENTRY_SIZE = 8 + MODULE_NAME_LEN   # ulong crc + char name[56]
+
+KSYMTAB_RE = re.compile(r'__ksymtab_(?:gpl_)?(\w+)$')
 
 
 def elf_sections(path):
@@ -83,7 +100,6 @@ def cmd_baseline(moddir, out_path):
         if not vers:
             continue
         baseline[fn] = {k: '%08x' % v for k, v in vers.items()}
-        # vermagic 从 .modinfo 粗读
         with open(p, 'rb') as f:
             blob = f.read()
         i = blob.find(b'vermagic=')
@@ -112,35 +128,73 @@ def parse_symvers(path):
     return out
 
 
-def cmd_verify(baseline_path, symvers_path):
+def cmd_exports(kallsyms_path, out_path):
+    """从原厂 /proc/kallsyms 提取 vmlinux 导出符号（__ksymtab_ 条目，不带 [module]）"""
+    vm, mods = set(), {}
+    with open(kallsyms_path, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            parts = line.rstrip('\n').split('\t')
+            head = parts[0].split()
+            if len(head) < 3:
+                continue
+            m = KSYMTAB_RE.match(head[2])
+            if not m:
+                continue
+            origin = parts[1].strip() if len(parts) > 1 else ''
+            if origin.startswith('['):
+                mods.setdefault(m.group(1), origin.strip('[]'))
+            else:
+                vm.add(m.group(1))
+    json.dump(sorted(vm), open(out_path, 'w', encoding='utf-8'), indent=0)
+    print('vmlinux 导出符号 %d 个 -> %s' % (len(vm), out_path))
+    print('模块导出符号 %d 个（这些由原厂 .ko 互相提供，不参与校验）' % len(mods))
+
+
+def cmd_verify(baseline_path, symvers_path, exports_path=None):
     base = json.load(open(baseline_path, encoding='utf-8'))
     kernel = parse_symvers(symvers_path)
-    bad, missing = {}, {}
+    vmlinux_exports = None
+    if exports_path:
+        vmlinux_exports = set(json.load(open(exports_path, encoding='utf-8')))
+
+    bad, missing, deferred, orphan = {}, {}, {}, {}
     total = 0
     for mod, syms in base['modules'].items():
         for sym, crc in syms.items():
             total += 1
             got = kernel.get(sym)
-            if got is None:
+            if got is not None:
+                if got != crc:
+                    bad.setdefault(sym, {'need': crc, 'got': got, 'mods': []})['mods'].append(mod)
+                continue
+            # 新内核没导出，判断该符号在原厂是不是本来就不由 vmlinux 提供
+            if vmlinux_exports is None:
                 missing.setdefault(sym, []).append(mod)
-            elif got != crc:
-                bad.setdefault(sym, {'need': crc, 'got': got, 'mods': []})['mods'].append(mod)
+            elif sym in vmlinux_exports:
+                missing.setdefault(sym, []).append(mod)      # 原厂 vmlinux 有，我们没有 -> 真问题
+            else:
+                deferred.setdefault(sym, []).append(mod)     # 原厂由别的 .ko 提供 -> 不参与
 
     print('检查 %d 个模块 / %d 条符号依赖' % (len(base['modules']), total))
-    print('新内核导出符号总数: %d' % len(kernel))
+    print('新内核 vmlinux 导出符号总数: %d' % len(kernel))
+    if vmlinux_exports is not None:
+        print('原厂 vmlinux 导出符号总数: %d' % len(vmlinux_exports))
+        print('其中由原厂其它 .ko 提供、本次不校验的依赖: %d 个符号' % len(deferred))
     print()
-    if not bad and not missing:
-        print('结果: 全部匹配，可以刷。')
-        return 0
+
     if bad:
         print('!! CRC 不一致 %d 个（这些模块会拒绝加载）:' % len(bad))
         for sym, info in sorted(bad.items())[:40]:
             print('   %-40s 需要 %s / 新内核 %s  <- %s' %
                   (sym, info['need'], info['got'], ', '.join(info['mods'][:3])))
     if missing:
-        print('!! 新内核未导出 %d 个（同样会加载失败）:' % len(missing))
+        print('!! 原厂 vmlinux 提供、新内核缺失 %d 个（会加载失败）:' % len(missing))
         for sym, mods in sorted(missing.items())[:40]:
             print('   %-40s <- %s' % (sym, ', '.join(mods[:3])))
+
+    if not bad and not missing:
+        print('结果: 全部匹配，kABI 与原厂一致，可以刷。')
+        return 0
     print()
     print('结论: 不要刷。先回到 .config 减少改动，或把配置项关掉重编。')
     return 1
@@ -152,8 +206,10 @@ def main():
         return 2
     if sys.argv[1] == 'baseline':
         return cmd_baseline(sys.argv[2], sys.argv[4] if len(sys.argv) > 4 else 'vendor-crc-baseline.json')
+    if sys.argv[1] == 'exports':
+        return cmd_exports(sys.argv[2], sys.argv[4] if len(sys.argv) > 4 else 'stock-vmlinux-exports.json')
     if sys.argv[1] == 'verify':
-        return cmd_verify(sys.argv[2], sys.argv[3])
+        return cmd_verify(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else None)
     print(__doc__)
     return 2
 
