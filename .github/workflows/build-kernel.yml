@@ -245,7 +245,9 @@ jobs:
           cat config/sukisu.config >> "$KDIR/.config"
 
           make -C "$KDIR" ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
-            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" olddefconfig
+            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" olddefconfig 2>&1 | tee olddefconfig.log
+          echo "=== kconfig 告警/错误 ==="
+          grep -iE "warning|error|recursive" olddefconfig.log | head -30 || echo "  (none)"
 
           echo "=== 关键配置复查（依据 Droidspaces 官方 GKI 清单）==="
           # 缺任意一项：容器直接起不来 / 硬件不可用 —— 硬失败
@@ -284,7 +286,14 @@ jobs:
             if grep -q "^CONFIG_${sym}=y" "$KDIR/.config"; then
               printf "  ok    CONFIG_%s=y\n" "$sym"
             else
-              echo "::error::CONFIG_${sym} 被 olddefconfig 丢掉了，指纹会失效"; exit 1
+              echo "::error::CONFIG_${sym} 被 olddefconfig 丢掉了，指纹会失效"
+              echo "---- .config 里的 OPLUS 项 ----"
+              grep -n "OPLUS" "$KDIR/.config" | head -20 || true
+              echo "---- olddefconfig 尾部 ----"
+              tail -30 olddefconfig.log || true
+              echo "---- 指纹 Kconfig 是否被 source ----"
+              grep -rn "OPLUS_FINGERPRINT" "$KDIR/drivers" --include=Kconfig 2>/dev/null | head -5 || true
+              exit 1
             fi
           done
           for sym in OPLUS_FEATURE_SCHED_ASSIST DEVTMPFS_MOUNT; do
@@ -365,6 +374,7 @@ jobs:
             src/kernel/msm-5.4/.config
             src/kernel/msm-5.4/System.map
             build.log
+            olddefconfig.log
             crc-report.txt
           if-no-files-found: warn
           include-hidden-files: true
