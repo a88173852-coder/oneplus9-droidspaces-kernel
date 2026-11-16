@@ -102,7 +102,34 @@ for fn in ("ksu_show_vfsmnt", "ksu_show_mountinfo", "ksu_show_vfsstat"):
     src = src.replace(old_sig, new_sig, 1)
     print("② %s 去掉 __nocfi（补 typeid）" % fn)
 
-# ---- ③ 诊断插桩：定位已完成（钩子确实被调用、卡点已查明），撤掉 ----
+# ---- ③ 扩充 marker：把容器类挂载也纳入过滤 ----
+# 上游 markers 只有 /adb/、/data/adb、kernelsu、magisk、zygisk、/debug_ramdisk。
+# 本机跑着 Droidspaces 和 daidai 两个容器，它们在 /data/local/<name>/ 下各挂了一堆
+# dev/proc/sys/pts/shm。这些路径不含上面任何一个 marker，于是：
+#   - 目录被 sus_path 隐藏（app 看不见 /data/local/daidai）
+#   - 挂载记录却照常输出 → 挂载点路径不可达 → 春秋的「挂载间隙」
+# 实测：去掉 daidai 的 sus_path 后 13 个挂载点恢复可达、间隙消失，
+# 但容器痕迹暴露，异常项从 14 涨到 16。所以必须两边一起隐藏。
+OLD_MARKERS = """static const char *const ksu_mount_markers[] = {
+    "/adb/", "/data/adb", "kernelsu", "magisk", "zygisk", "/debug_ramdisk",
+};"""
+NEW_MARKERS = """static const char *const ksu_mount_markers[] = {
+    "/adb/", "/data/adb", "kernelsu", "magisk", "zygisk", "/debug_ramdisk",
+    /* 容器挂载：本机 Droidspaces / daidai / nandswap，目录被 sus_path 隐藏后
+     * 这些挂载点若不一起隐藏，就会在 app 视角变成「路径不可达的孤儿挂载」。 */
+    "daidai", "Droidspaces", "nandswap",
+};"""
+
+MARK_MARKERS = "daidai"
+if MARK_MARKERS in src:
+    print("③ markers 已扩充，跳过")
+else:
+    if OLD_MARKERS not in src:
+        sys.exit("锚点没找到：ksu_mount_markers 与预期不一致")
+    src = src.replace(OLD_MARKERS, NEW_MARKERS, 1)
+    print("③ markers 已扩充（daidai / Droidspaces / nandswap）")
+
+# ---- ④ 诊断插桩：定位已完成（钩子确实被调用、卡点已查明），撤掉 ----
 DBG = False
 MARK_DBG = "MH_DBG"
 if MARK_DBG in src:

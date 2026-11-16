@@ -271,6 +271,10 @@ jobs:
             || { echo "::error::mount_hide 补丁没打上，模块挂载会对 app 全裸"; exit 1; }
           grep -q 'typeid 都不匹配' "$KDIR/KernelSU/kernel/feature/mount_hide.c" \
             && { echo "::error::源码里还残留旧版 kCFI 自检，补丁没生效"; exit 1; }
+          # 容器挂载 marker：缺了它，/data/local/daidai 的 13 个挂载点会变成孤儿，
+          # 春秋报「挂载间隙」。
+          grep -q '"daidai"' "$KDIR/KernelSU/kernel/feature/mount_hide.c" \
+            || { echo "::error::markers 没扩充，容器挂载会漏过滤"; exit 1; }
           echo "mount_hide 补丁已注入"
 
           # /proc/version 的编译器串不受任何 KBUILD_* 影响，只能改 mkcompile_h 写死。
