@@ -25,18 +25,18 @@ C 源码里 `p->show = show_mountinfo;` 存进去的是 **`.cfi_jt` 跳板地址
   - `p->show` 不像内核指针（高 16 位不是 0xffff）→ 说明布局假设不成立，放弃并打印
   - 否则直接替换
 
-## 门二：wrapper 上的 __nocfi 会让 CFI 检查失败
+## 门二（已撤销）：wrapper 的 __nocfi 与 kCFI typeid
 
-`p->show(m, "")` 是在 fs/proc_namespace.c 的 `m_show()` 里做的间接调用，调用点由
-kCFI 插桩：读 `*(u32 *)(target - 4)` 当 typeid 和目标比。上游给三个 wrapper 打了
-`__nocfi`，就是让它们「没有 typeid」→ 一旦真的被 p->show 间接调到，检查必失败
-（`__cfi_check_fail` → BUG/panic）。上游在 GKI 上没炸，是因为那边 p->show 从来没被
-成功替换过（门一一直拦着），这条路径压根没走到。
+曾经把三个 wrapper 的 `__nocfi` 去掉，理由是「m_show 调用 p->show 时会读
+*(u32 *)(target-4) 比 typeid，wrapper 需要正确 typeid」。反汇编核实后这个前提是错的：
 
-本补丁只保留 `ksu_filter_show` 的 `__nocfi`（它确实要拿裸函数指针调 orig），
-把三个 wrapper 的 `__nocfi` 去掉 —— 它们的签名与 `show_vfsmnt` 完全一致
-（`int (struct seq_file *, struct vfsmount *)`），编译器会给它们生成与原生 show
-相同的 kCFI typeid，间接调用即可通过检查。
+    m_show 调用点：blr x8，前面没有 ldr [x8,#-4]
+    wrapper（36 字节）：0 处 kCFI 检查，0 处间接调用（只 tail-call）
+    ksu_filter_show（__nocfi）：0 处 kCFI 检查，2 处 blr x2（回调 orig）
+
+即调用点根本不校验。因此 wrapper 有没有 `__nocfi` 都不影响安全性。
+本补丁仍去掉 `__nocfi`，只为让 wrapper 不再依赖 `__nocfi` 属性传播，
+行为上等价；真正决定成败的是门一。
 
 用法: python3 patches/compat/patch_mount_hide.py <path/to/KernelSU/kernel/feature/mount_hide.c>
 """
@@ -57,41 +57,23 @@ OLD = """    if (p->show != expected) {
 
 NEW = """    /*
      * 本内核 CONFIG_CFI_CLANG=y + ThinLTO：p->show 里存的是 show_xxx 的 .cfi_jt
-     * 跳板地址，而 expected 是 kallsyms 解析出来的函数本体地址，两者永远不等
-     * （实测 p->show=ffffffe5c9196120 / expected=ffffffe5c8019dd4）。
-     * 上游那句 if (p->show != expected) 因此恒真，一次都没过滤过。
-     * 改成：幂等判重 + 内核指针健全性检查，然后直接替换。
+     * 跳板地址，而 expected 是 kallsyms 解析出来的函数本体地址（符号还带 $hash
+     * 后缀），两者永远不等 —— 上游那句 if (p->show != expected) 恒成立，
+     * 于是三个钩子全装上了、却一次都没过滤过。
+     *
+     * 关于 kCFI（2026-11-16 反汇编实测，run38 镜像 System.map + Image）：
+     *   - m_show 里调用 p->show 的地方是 blr x8，前面没有 ldr [x8,#-4]，
+     *     即调用点根本不读 typeid；
+     *   - 三个 wrapper 各 36 字节，只做 tail-call 到 ksu_filter_show；
+     *   - ksu_filter_show 是 __nocfi，拿裸指针回调 orig。
+     *   整条链上没有任何 typeid 比对，所以直接替换是安全的，
+     *   不需要（也不可能）自证 typeid。
      */
     if (p->show == filter)
-        return 0;
+        return 0;          /* 已经换过，幂等 */
     if ((((unsigned long)p->show) >> 48) != 0xffffUL) {
         pr_warn_once("mount_hide: p->show 不像内核指针 (%px)，放弃\\n", (void *)p->show);
         return 0;
-    }
-    /*
-     * 换之前先自证能过 kCFI：m_show() 里的间接调用会读 *(u32 *)(target - 4)
-     * 当 typeid 去比对。这里照做一遍，相等才换；不相等则不做任何事
-     * （只是没隐藏，不会 panic）。
-     *
-     * 注意（2026-11-16 实测修正）：不能拿 p->show - 4 当判据。p->show 在 CFI
-     * 内核上存的是 `.cfi_jt` 跳板地址，跳板自身前面未必是 typeid，读出来是
-     * 垃圾值 —— 上一版就是这么误判成「不匹配」而放弃的（实测
-     * native=17ba0cca ours=17ba0f2d）。真正的判据是 expected：它是 kallsyms
-     * 解析出的 show_xxx **本体**地址，本体前 4 字节才是编译器生成的 typeid。
-     * 两个候选都试一遍，任一匹配即认为兼容。
-     */
-    {
-        u32 have = *(u32 *)((unsigned long)filter - 4);
-        u32 want_body = *(u32 *)((unsigned long)expected - 4);
-        u32 want_show = *(u32 *)((unsigned long)p->show - 4);
-
-        if (have != want_body && have != want_show) {
-            pr_warn_once("mount_hide: kCFI typeid 都不匹配 (filter=%08x body=%08x show=%08x)，放弃\\n",
-                         have, want_body, want_show);
-            return 0;
-        }
-        pr_info_once("mount_hide: kCFI typeid 复核通过 (filter=%08x body=%08x show=%08x)\\n",
-                     have, want_body, want_show);
     }
     pr_info_once("mount_hide: swap show %px -> %px (kallsyms orig=%px)\\n",
                  (void *)p->show, (void *)filter, (void *)expected);
@@ -120,34 +102,15 @@ for fn in ("ksu_show_vfsmnt", "ksu_show_mountinfo", "ksu_show_vfsstat"):
     src = src.replace(old_sig, new_sig, 1)
     print("② %s 去掉 __nocfi（补 typeid）" % fn)
 
-# ---- ③ 诊断期临时插桩（定位完把 DBG 改成 False 即可全撤）----
-DBG = True
-if DBG:
-    MARK_DBG = "MH_DBG"
-    if MARK_DBG in src:
-        print("③ 诊断插桩已存在，跳过")
-    else:
-        # 三个 .open shim 的入口：证明钩子到底有没有被调用
-        for tag, orig in (("mounts", "ksu_orig_mounts_open"),
-                          ("mountinfo", "ksu_orig_mountinfo_open"),
-                          ("mountstats", "ksu_orig_mountstats_open")):
-            old = "    int ret = %s(inode, file);" % orig
-            new = ('    pr_info("MH_DBG %s_open uid=%%d hide=%%d\\n", current_uid().val,\n'
-                   '            ksu_should_hide_mount_for_current());\n'
-                   '    int ret = %s(inode, file);' % (tag, orig))
-            if old not in src:
-                sys.exit("锚点没找到：%s 的 open shim 与预期不一致" % tag)
-            src = src.replace(old, new, 1)
-
-        # install_filter 的四个出口：证明它走到了哪一步
-        old = "    if (!m || !m->private)\n        return 0;"
-        new = ('    pr_info("MH_DBG install_filter file=%px m=%px priv=%px\\n",\n'
-               '            (void *)file, (void *)m, m ? (void *)m->private : NULL);\n'
-               '    if (!m || !m->private)\n        return 0;')
-        if old not in src:
-            sys.exit("锚点没找到：install_filter 的 !m 判空与预期不一致")
-        src = src.replace(old, new, 1)
-        print("③ 诊断插桩已注入")
+# ---- ③ 诊断插桩：定位已完成（钩子确实被调用、卡点已查明），撤掉 ----
+DBG = False
+MARK_DBG = "MH_DBG"
+if MARK_DBG in src:
+    import re
+    src = re.sub(r'[ \t]*pr_info\("MH_DBG[\s\S]*?\);[ \t]*\n', '', src)
+    print("③ 已移除历史诊断插桩（MH_DBG）")
+else:
+    print("③ 无诊断插桩，跳过")
 
 open(PATH, "w").write(src)
 print("mount_hide 补丁注入完成")

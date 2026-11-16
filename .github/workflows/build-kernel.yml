@@ -258,15 +258,19 @@ jobs:
 
           patch -d "$KDIR" -p1 --fuzz=3 --verbose < patches/sukisu-selinux-reload.patch
 
-          # mount_hide 在本树（一加9 / 5.4 非 GKI + CONFIG_CFI_CLANG）上有两道门：
-          #   ① p->show 存的是 show_xxx 的 .cfi_jt 跳板，kallsyms 解析出的是函数本体，
-          #      上游 `if (p->show != expected)` 恒真 → 永远放弃过滤；
-          #   ② 三个 wrapper 带 __nocfi → 没有 kCFI typeid，真被间接调到会 __cfi_check_fail。
-          # 两道门都堵上（替换前先自证 typeid 一致，不一致就不换，不会 panic）。
+          # mount_hide 在本树（一加9 / 5.4 非 GKI + CONFIG_CFI_CLANG）上的真实卡点：
+          #   p->show 存的是 show_xxx 的 .cfi_jt 跳板地址，而 kallsyms 解析出的是
+          #   函数本体（还带 $hash 后缀），上游 `if (p->show != expected)` 恒真，
+          #   于是三个钩子全装上了却一次都没过滤过。
+          # 反汇编核实过（run38 镜像）：m_show 调用 p->show 处是 blr x8、
+          #   前面没有 ldr [x8,#-4]；wrapper 只 tail-call；ksu_filter_show 是 __nocfi。
+          #   整条链上没有 typeid 比对，所以直接替换安全，无需自证 kCFI。
           python3 patches/compat/patch_mount_hide.py "$KDIR/KernelSU/kernel/feature/mount_hide.c"
-          # 判据用新逻辑独有的标识符 want_body，别用日志文案（文案一改动就误判失败）
-          grep -q 'want_body' "$KDIR/KernelSU/kernel/feature/mount_hide.c" \
+          # 判据用新逻辑独有的标识符，别用日志文案（文案一改动就误判失败）
+          grep -q 'swap show' "$KDIR/KernelSU/kernel/feature/mount_hide.c" \
             || { echo "::error::mount_hide 补丁没打上，模块挂载会对 app 全裸"; exit 1; }
+          grep -q 'typeid 都不匹配' "$KDIR/KernelSU/kernel/feature/mount_hide.c" \
+            && { echo "::error::源码里还残留旧版 kCFI 自检，补丁没生效"; exit 1; }
           echo "mount_hide 补丁已注入"
 
           # /proc/version 的编译器串不受任何 KBUILD_* 影响，只能改 mkcompile_h 写死。
