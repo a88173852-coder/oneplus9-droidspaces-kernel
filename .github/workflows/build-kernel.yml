@@ -326,6 +326,14 @@ jobs:
             || { echo "::error::selinuxfs 守卫数量不足（access + policy 应各一处；context 必须放行）"; exit 1; }
           echo "selinuxfs app uid 守卫已注入（access + policy，context 放行）"
 
+          # ROOT 项第二层：春秋往 context 节点写 u:r:ksu:s0 探测 KSU 策略是否存在。
+          # 不能整节点挡（run44 黑屏教训），改为按内容过滤：只拒绝 ksu 特征字符串，
+          # 正常 app context（u:r:untrusted_app:s0 等）照常放行，zygote setcon 不受影响。
+          python3 patches/compat/patch_selinuxfs_context_filter.py "$KDIR/security/selinux/selinuxfs.c"
+          grep -q 'SEL_CONTEXT_FILTER' "$KDIR/security/selinux/selinuxfs.c" \
+            || { echo "::error::context 关键词过滤没注入"; exit 1; }
+          echo "selinuxfs ksu 上下文关键词过滤已注入"
+
           # /proc/version 的编译器串不受任何 KBUILD_* 影响，只能改 mkcompile_h 写死。
           # 不改的话会暴露 CI 的 clang 快照号 + LLD 的 buildbot 临时目录（每次都变）。
           python3 patches/compat/patch_mkcompile_h.py "$KDIR/scripts/mkcompile_h"
