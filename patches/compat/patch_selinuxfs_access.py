@@ -81,18 +81,18 @@ def guard_for(node: str) -> str:
 
 TARGETS = (
     # (函数, 签名正则, 首语句锚点, 节点名)
-    # sel_write_access/sel_write_context 的第一条语句都是 avc_has_perm(...)
+    # !!! context 节点绝不能挡 !!!
+    # run44 实机教训：zygote specialize 每个 app（uid>=10000）时都要走
+    # selinux_android_setcontext -> libselinux setcon，底层写的就是
+    # /sys/fs/selinux/context。挡了它 = 所有 app 一启动就
+    # "selinux_android_setcontext failed" SIGABRT，整机黑屏。
+    # context 只做「字符串 -> sid」翻译，泄漏的只是 sid 编号，
+    # 真正的证据（允许位图）在 access 节点，挡住 access 即可断供。
     (
         "sel_write_access",
         r"static ssize_t sel_write_access\(struct file \*file, char \*buf, size_t size\)\n\{\n",
         "\n\tlength = avc_has_perm(&selinux_state,",
         "access",
-    ),
-    (
-        "sel_write_context",
-        r"static ssize_t sel_write_context\(struct file \*file, char \*buf, size_t size\)\n\{\n",
-        "\n\tlength = avc_has_perm(&selinux_state,",
-        "context",
     ),
     # 第三个通道：直接读策略二进制（春秋的 probe-leaf 会尝试打开）。
     # 上策是它本来就被 read_policy 挡着，这里再加一道，保证 app 侧二者行为一致。
@@ -135,5 +135,5 @@ open(PATH, "w", encoding="utf-8", errors="surrogateescape").write(src)
 
 total = src.count(MARK)
 print(f"完成：新增 {patched} 处，文件内共 {total} 处标记")
-if total < 3:
-    sys.exit(f"自检失败：期望 3 处 {MARK}，实际 {total} 处")
+if total < 2:
+    sys.exit(f"自检失败：期望 2 处（access + policy），实际 {total} 处")
