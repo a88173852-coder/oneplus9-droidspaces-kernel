@@ -291,6 +291,24 @@ jobs:
             || { echo "::error::helper 注入了但 show 里没调用，等于没过滤"; exit 1; }
           echo "loop backing_file 过滤已注入"
 
+          # 春秋 4.6.3 的「检测SELinux Policy时发现可疑问题」不是读策略二进制，
+          # 而是以应用身份调 selinuxfs 查询接口（kprobe 实测，nativecheck_zygote 子进程）：
+          #   /sys/fs/selinux/access   写 "scon tcon tclass" 读回 avd.allowed 位图（72 次）
+          #   /sys/fs/selinux/context  把上下文字符串翻译成 sid（88 次）
+          #   /sys/fs/selinux/class/*/perms/*  权限名 → 位索引
+          # 再用 vendor_sepolicy.cil 建静态模型，于是还原出
+          #   "untrusted_app -> ksu_file read"（源自 rules_54.c 的 allow domain ksu_file ALL）
+          # 和 "access seqno"（access 接口返回的 avd.seqno 字段）。
+          # 挡法：uid >= 10000 一律 -EACCES；root/system/shell 不受影响，
+          # 也不动代码段、不克隆 policydb（upstream selinux_hide.c 那套要 5.5 API）。
+          python3 patches/compat/patch_selinuxfs_access.py "$KDIR/security/selinux/selinuxfs.c"
+          grep -q 'SECFS_APP_GUARD' "$KDIR/security/selinux/selinuxfs.c" \
+            || { echo "::error::selinuxfs 的 app uid 守卫没注入，春秋仍可枚举 ksu 规则"; exit 1; }
+          # 必须三处都在：access / context / policy，少一处它就有别的通道绕过去
+          test "$(grep -c 'SECFS_APP_GUARD' "$KDIR/security/selinux/selinuxfs.c")" -ge 3 \
+            || { echo "::error::selinuxfs 守卫数量不足（access/context/policy 应各一处）"; exit 1; }
+          echo "selinuxfs app uid 守卫已注入"
+
           # /proc/version 的编译器串不受任何 KBUILD_* 影响，只能改 mkcompile_h 写死。
           # 不改的话会暴露 CI 的 clang 快照号 + LLD 的 buildbot 临时目录（每次都变）。
           python3 patches/compat/patch_mkcompile_h.py "$KDIR/scripts/mkcompile_h"
