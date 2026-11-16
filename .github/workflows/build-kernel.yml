@@ -277,6 +277,20 @@ jobs:
             || { echo "::error::markers 没扩充，容器挂载会漏过滤"; exit 1; }
           echo "mount_hide 补丁已注入"
 
+          # 非原厂 loop 的 backing_file 会原样写出容器与模块镜像的真实路径：
+          #   /sys/block/loop42/loop/backing_file = /data/local/Droidspaces/Containers/ubuntu/rootfs.img
+          #   /sys/block/loop41/loop/backing_file = /data/adb/modules/meta-overlayfs/modules.img
+          # 春秋那条「loop42」就是这么被看见的（mount_hide 管不到 sysfs）。
+          # sus_path 对 kernfs inode 不可靠（inode 会重建，标记半分钟失效），
+          # 所以只在 show 输出这一层过滤：命中即返回 0 字节，等同“未绑定后备文件”。
+          # 只改只读属性，不碰 LOOP_SET_FD/挂载逻辑，容器照常跑。
+          python3 patches/compat/patch_loop_hide.py "$KDIR/drivers/block/loop.c"
+          grep -q 'loop_path_should_hide' "$KDIR/drivers/block/loop.c" \
+            || { echo "::error::loop backing_file 过滤没打上，容器路径会在 sysfs 裸奔"; exit 1; }
+          grep -q 'loop_path_should_hide(p)' "$KDIR/drivers/block/loop.c" \
+            || { echo "::error::helper 注入了但 show 里没调用，等于没过滤"; exit 1; }
+          echo "loop backing_file 过滤已注入"
+
           # /proc/version 的编译器串不受任何 KBUILD_* 影响，只能改 mkcompile_h 写死。
           # 不改的话会暴露 CI 的 clang 快照号 + LLD 的 buildbot 临时目录（每次都变）。
           python3 patches/compat/patch_mkcompile_h.py "$KDIR/scripts/mkcompile_h"
