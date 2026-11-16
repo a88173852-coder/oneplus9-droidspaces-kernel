@@ -291,6 +291,22 @@ jobs:
             || { echo "::error::helper 注入了但 show 里没调用，等于没过滤"; exit 1; }
           echo "loop backing_file 过滤已注入"
 
+          # sysfs 挡住还不够：春秋的「KernelSU loop device: loop42」走的是
+          # LOOP_GET_STATUS64 ioctl，lo_file_name 会原样返回容器镜像路径。
+          # 对 app uid 清空 ioctl 返回的 lo_file_name / lo_name。
+          python3 patches/compat/patch_loop_ioctl_hide.py "$KDIR/drivers/block/loop.c"
+          grep -q 'LOOP_IOCTL_HIDE' "$KDIR/drivers/block/loop.c" \
+            || { echo "::error::loop ioctl 守卫没注入，春秋仍能从 ioctl 读到容器路径"; exit 1; }
+          echo "loop ioctl 文件名过滤已注入"
+
+          # 「设备取得ROOT权限/异常模块」项：春秋遍历 /proc/<pid>/attr/current，
+          # 命中 ksud/zn-daemon 等一票 u:r:ksu:s0 进程。
+          # 对 app uid 在 proc_pid_attr_read 返回前把 ksu 上下文替换掉。
+          python3 patches/compat/patch_proc_attr_hide.py "$KDIR/fs/proc/base.c"
+          grep -q 'PROC_ATTR_HIDE' "$KDIR/fs/proc/base.c" \
+            || { echo "::error::proc attr 上下文隐藏没注入"; exit 1; }
+          echo "proc attr ksu 上下文隐藏已注入"
+
           # 春秋 4.6.3 的「检测SELinux Policy时发现可疑问题」不是读策略二进制，
           # 而是以应用身份调 selinuxfs 查询接口（kprobe 实测，nativecheck_zygote 子进程）：
           #   /sys/fs/selinux/access   写 "scon tcon tclass" 读回 avd.allowed 位图（72 次）→ 挡
